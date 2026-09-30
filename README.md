@@ -5,12 +5,13 @@ An agent-native architecture editor for concept and schematic design. The archit
 V0 is parallel test-fits: the architect enters a shell and a brief, N agents each produce a layout option, and each option comes back with a scorecard and a rendered plan.
 
 Status: the v2 core, transactional SQLite mutation path, shared tool registry, and first bounded
-persisted single-option pi workflow are implemented. Requirements use explicit space assignments;
-scorecards pass configured concept-design checks, **not building-code certification**.
-The workflow is programmatic and credential-bound; default HTTP/MCP exposes no unauthenticated
-project access or mutation. The editor, rendered-option comparison, acceptance into main, and full
-agent/diversity evaluation suite remain future work. Deterministic injected pi streams verify the
-workflow without spending on external model APIs; they do not establish model design quality.
+persisted single-option pi workflow are implemented, with a minimal authenticated SVG option-review
+UI and owner-only transactional acceptance into main. Requirements use explicit space assignments;
+scorecards pass configured concept-design checks, **not building-code certification**. Default
+HTTP/MCP exposes no unauthenticated project access or mutation. Run generation remains programmatic;
+geometry editing UI, automatic recovery/resume, and the full agent/diversity evaluation suite remain
+future work. Deterministic injected pi streams verify the workflow without spending on external
+model APIs; they do not establish model design quality.
 See the [geometry contract](packages/core/docs/geometry-contract.md) and
 [brief and scorecard contract](packages/core/docs/brief-and-scorecard.md) for supported behavior and limitations.
 
@@ -23,7 +24,7 @@ See the [geometry contract](packages/core/docs/geometry-contract.md) and
 | `packages/store` | SQLite store (`node:sqlite`): revisions, refs, briefs, redlines, runs, request outcomes |
 | `apps/server` | HTTP API + SSE, MCP server (`/mcp`), run orchestrator (pi agents) |
 | `apps/cli` | `or1` command line |
-| `apps/editor` | Browser editor (Vite, React, Three.js) |
+| `apps/editor` | Browser option review (Vite, React, SVG) |
 | `evals` | Fixtures, importers and eval scenarios |
 
 ## Development
@@ -40,6 +41,27 @@ pnpm or1 tools    # CLI
 ```
 
 Project data lives in `~/.local/share/or1` (`OR1_DATA_DIR` overrides it), never in this repo.
+
+## Review and acceptance
+
+The local review API is opt-in: configure a strong `OR1_OWNER_TOKEN` (at least 32 bearer-safe
+characters) in the server environment, then run the server on loopback and the editor. Enter the
+token in the editor's password field and an existing project ID and option ref. The token stays in
+browser memory; do not put it in a URL, Vite environment variable, committed file, or browser storage.
+See [local owner configuration](apps/server/README.md#local-owner-review-api) for the database path
+and transport contract. This credential grants owner access to the local database, not just the
+project entered in the UI. Do not expose this development service to a network.
+
+Review compares main and the candidate at a shared scale, with actual requirement assignments,
+score gates, and exact revision/brief/baseline pins. Acceptance freshly scores the pinned option in
+the same transaction that appends a main revision and durable approval receipt. Agents and external
+callers cannot write main; owners can still edit it directly without an acceptance score.
+
+Acceptance is **promotion, not merge**: an option's immutable fork baseline must still be current
+main. Accepting one option makes its siblings stale, although they remain viewable. Refreshing a
+review cannot make a diverged option eligible; there is no automatic rebase or ID remapping. Source
+options, run records, and historical snapshots are preserved. A lost acceptance response must be
+retried with its original request ID and pins, not a newly generated command.
 
 ## Persisted workflow contracts
 

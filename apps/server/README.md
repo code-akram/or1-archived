@@ -1,12 +1,74 @@
 # First persisted agent workflow
 
-This is a **programmatic, single-owning-runner** workflow, not a public run-start API. HTTP still
-offers `/health`, `/events`, and schema-generated `/mcp`; there are no unauthenticated database-write
-or run-start routes. Anonymous MCP clients may list tool schemas, but registry data and mutation
-calls fail closed. An embedding application may pass credential-derived context to
-`createMcpServer(context)` or `createMcpNodeHandler(context)`; request/model arguments are not credentials.
+This is a **programmatic, single-owning-runner** workflow, not a public run-start API. HTTP offers
+`/health`, `/events`, schema-generated `/mcp`, and an explicitly enabled local owner review API;
+there are no unauthenticated database-write or run-start routes. Anonymous MCP clients may list tool
+schemas, but registry data and mutation calls fail closed. An embedding application may pass
+credential-derived context to `createMcpServer(context)` or `createMcpNodeHandler(context)`;
+request/model arguments are not credentials.
 MCP accepts only external credentials without an in-app run binding; supplied owner/agent roles are
 rejected, never silently coerced.
+
+## Local owner review API
+
+By default, project-review routes are absent and HTTP startup opens no project store. To opt in,
+configure `OR1_OWNER_TOKEN` as a strong secret of at least 32 bearer-safe characters. The stable
+credential namespace is `local-owner`; `OR1_OWNER_NAMESPACE` may override it with a bounded nonempty
+nonsecret identifier. Setting the namespace without a token, or supplying an invalid token/namespace,
+fails startup. Rotating a token for the same principal should retain the namespace so exact request
+replay remains possible. Never log or commit the token.
+
+Owner-enabled startup must bind to loopback (`OR1_HOST`, default `127.0.0.1`), not `0.0.0.0` or a
+network interface. Startup opens `or1.sqlite` under `OR1_DATA_DIR` / `dataDir()`; programmatic callers
+must use that same database to review their options in the default server. This is a development-only
+local owner capability over the whole database, not a multi-user or internet deployment. Project/ref
+input is not a credential scope. Startup does not start a pi runner or spend model tokens.
+
+The only owner HTTP tools exposed are:
+
+| Route | Parameters | Response |
+| --- | --- | --- |
+| `POST /tools/review_option` | `{ projectId, ref }` for an existing option | Coherent main/option models, derived plans, brief, current-main scorecards, and advisory acceptance eligibility |
+| `POST /tools/accept_option` | Registry acceptance envelope with reviewed pins and request ID | New main revision and persisted acceptance receipt, or deterministic rejection |
+
+Both dispatch the shared TypeBox registry definitions; HTTP does not redefine schemas or write SQL.
+Send `Authorization: Bearer <token>` and `Content-Type: application/json`. Credentials in query/body,
+cookies, and supplied roles are not accepted. Successfully dispatched domain rejections return HTTP
+200 with `{ ok: false, code, ... }`; authentication/transport failures use 4xx, and unexpected failures
+use a sanitized 5xx. Responses are `no-store`. Request bodies are bounded incrementally by actual
+received bytes, with registry depth/node/geometry limits still authoritative. Host and optional Origin
+must be explicitly local; foreign/null origins, compressed bodies, and CORS preflights are rejected.
+
+The editor uses `/api/tools/...` through Vite's loopback proxy, which strips `/api` and rewrites Host.
+Default accepted browser origins are `http://localhost:5173` and `http://127.0.0.1:5173`; do not enable
+permissive CORS to work around a different preview port. An embedding application can supply explicit
+loopback `allowedOrigins` to the factory:
+
+```ts
+const server = createHttpServer({
+  owner: { token: trustedToken, context: { role: "owner", namespace: "local-owner", store } },
+  allowedOrigins: ["http://localhost:5173"],
+});
+```
+
+Injected stores are owned by the embedding host, not closed by the factory. Owner HTTP context is
+never passed into MCP. Agents/external callers cannot write main, including old cached main-write
+retries; existing historical records are not rewritten. Owners may edit main directly, but accepting
+an option always requires fresh passing non-certifying gates and an unchanged main fork baseline.
+Acceptance appends approval provenance; it never changes option snapshots, run status, or run scores.
+
+The UI freezes the exact acceptance request for uncertain-outcome retries. A timeout may follow a
+commit: retry with the original request ID, source/main/brief/baseline/evaluator pins, and credential
+namespace. Exact replay returns the historical receipt, not a claim that its revision remains latest
+main. After a deterministic stale rejection, review again and create a new request ID. A sibling
+option with an obsolete fork baseline cannot be made eligible by refreshing pins; merge/rebase and
+workflow auto-resume are not implemented.
+
+The UI conservatively requires the same token for an uncertain request because review does not
+expose the credential namespace. Resolve uncertain requests before rotating that token. If rotation
+has already occurred, the trusted embedding host must inspect/replay the frozen command with the
+original namespace; the API supports this, but the UI has no credential-rotation recovery workflow.
+Clearing inputs retains the intent in page memory, not durably across a closed/reloaded page.
 
 ## Supported invocation
 
