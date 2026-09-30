@@ -4,6 +4,8 @@ import type { Rejection } from "@or1/store/portable";
 /** Browser-safe contracts: this module has no runtime imports or registry dependencies. */
 export type CloudSession = {
   mode: "cloud";
+  /** Present only for the isolated, time-limited development review deployment. */
+  authentication?: "development-bypass";
   principalId: string;
   /** Unix milliseconds. */
   expiresAt: number;
