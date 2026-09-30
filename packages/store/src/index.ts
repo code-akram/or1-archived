@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -8,8 +9,8 @@ export function dataDir(env: NodeJS.ProcessEnv = process.env): string {
   return join(env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "or1");
 }
 
-/** Schema stub. Revisions form a tree; refs (main, option-*) point at heads. */
-const SCHEMA = `
+/** Version 1 is kept intact as the starting point for new and legacy databases. */
+const SCHEMA_V1 = `
 CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
   created_at TEXT NOT NULL
@@ -69,14 +70,592 @@ CREATE TABLE IF NOT EXISTS request_outcomes (
 `;
 
 export type Store = {
+  /** For inspection and legacy compatibility only. Application writes use execute/run helpers. */
   readonly db: DatabaseSync;
+  execute(
+    command: Command,
+    caller: Caller,
+    evaluate?: Evaluator,
+    validateMetadata?: MetadataValidator,
+  ): CommandResult;
+  readState(projectId: string, ref: string): RefState | null;
+  readSnapshot(projectId: string, revisionId: string): unknown;
+  readBriefs(projectId: string): RefState["brief"][];
+  createRun(run: RunRecord): void;
+  updateRun(id: string, patch: RunPatch): void;
+  finalizeRun(id: string, outcome: NonNullable<RunRecord["outcome"]>): CommandResult;
+  readRun(id: string): RunRecord | null;
+  saveRunTurn(turn: RunTurn): void;
+  readRunTurns(runId: string): RunTurn[];
   close(): void;
 };
 
+export type Caller = { role: "owner" | "agent" | "external"; namespace: string };
+type Envelope = { projectId: string; ref: string; baseRevision: string | null; requestId: string };
+/** The registry supplies core validation through validateMetadata/evaluate (core stays independent).
+ * For fork_ref, ref is the new target name and baseRevision is the sourceRef's expected head.
+ * apply_changes body is the canonical core command, including any caller-supplied context pins.
+ */
+export type Command = Envelope &
+  (
+    | { type: "create_project"; body: { model: unknown; brief: unknown } }
+    | { type: "fork_ref"; body: { sourceRef: string } }
+    | { type: "set_brief"; body: { brief: unknown; baseBriefVersion: number } }
+    | { type: "apply_changes"; body: unknown }
+  );
+export type Rejection = { ok: false; code: string; message?: string; details?: unknown };
+export type CommandResult =
+  | { ok: true; revisionId: string; briefVersion: number; effects: unknown }
+  | Rejection;
+export type RefState = {
+  projectId: string;
+  ref: string;
+  revisionId: string;
+  model: unknown;
+  brief: { version: number; body: unknown };
+  forkBase: { revisionId: string; model: unknown } | null;
+};
+export type Evaluation = { ok: true; model: unknown; effects: unknown } | Rejection;
+/** Must be synchronous and side-effect free; an exception rolls back without caching an outcome. */
+export type Evaluator = (state: RefState) => Evaluation;
+/** Runs inside the write transaction after preconditions and before metadata writes, never on replay.
+ * State is null for creation, the source ref for fork_ref, and the target ref for set_brief.
+ * May read store.readBriefs for lineage checks; must be synchronous and otherwise side-effect free.
+ * Return void to accept or a deterministic rejection to cache; exceptions roll back uncached.
+ */
+// biome-ignore lint/suspicious/noConfusingVoidType: acceptance deliberately permits callbacks with no return.
+export type MetadataValidator = (state: RefState | null) => Rejection | void;
+export type RunRecord = {
+  id: string;
+  projectId: string;
+  ref: string;
+  status: "queued" | "running" | "done" | "failed" | "cancelled" | "interrupted";
+  outcome: "options" | "infeasible" | "not_found_within_budget" | null;
+  instruction: string;
+  /** Null only for historical v1 run rows, which cannot be finalized by this API. */
+  revisionId: string | null;
+  baselineRevisionId: string | null;
+  briefVersion: number;
+  strategySeed: unknown;
+  budget: unknown;
+  retryCount: number;
+};
+export type RunPatch = {
+  status?: Exclude<RunRecord["status"], "done">;
+  retryCount?: number;
+};
+export type RunTurn = {
+  runId: string;
+  turn: number;
+  transcript: unknown;
+  result: unknown;
+  spend: unknown;
+};
+/** Maximum UTF-8 bytes of a turn's combined canonical transcript/result/spend JSON. */
+export const MAX_RUN_TURN_BYTES = 65_536;
+
+function transaction<T>(db: DatabaseSync, action: () => T): T {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const result = action();
+    db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function migrate(db: DatabaseSync): void {
+  transaction(db, () => {
+    const version = Number(db.prepare("PRAGMA user_version").get()?.user_version);
+    if (version > 2) throw new Error(`Unsupported store schema version ${version}`);
+    if (version < 1) {
+      db.exec(SCHEMA_V1);
+      db.exec("PRAGMA user_version = 1");
+    }
+    if (version < 2) {
+      db.exec(`
+        ALTER TABLE request_outcomes RENAME TO request_outcomes_v1;
+        CREATE TABLE request_outcomes (
+          id INTEGER PRIMARY KEY,
+          project_id TEXT,
+          namespace TEXT,
+          request_id TEXT NOT NULL,
+          role TEXT,
+          fingerprint TEXT,
+          context TEXT,
+          revision_id TEXT REFERENCES revisions(id),
+          outcome TEXT NOT NULL,
+          UNIQUE (project_id, namespace, request_id),
+          CHECK ((project_id IS NULL AND namespace IS NULL AND role IS NULL
+                  AND fingerprint IS NULL AND context IS NULL)
+            OR (project_id IS NOT NULL AND namespace IS NOT NULL
+                  AND role IS NOT NULL AND role IN ('owner', 'agent', 'external') AND fingerprint IS NOT NULL
+                  AND context IS NOT NULL AND length(project_id) BETWEEN 1 AND 128
+                  AND length(namespace) BETWEEN 1 AND 256 AND length(request_id) BETWEEN 1 AND 128
+                  AND length(fingerprint) = 64))
+        );
+        INSERT INTO request_outcomes (request_id, revision_id, outcome)
+          SELECT request_id, revision_id, outcome FROM request_outcomes_v1;
+        DROP TABLE request_outcomes_v1;
+        CREATE UNIQUE INDEX legacy_request_ids ON request_outcomes(request_id)
+          WHERE project_id IS NULL;
+        ALTER TABLE runs ADD COLUMN revision_id TEXT REFERENCES revisions(id);
+        ALTER TABLE runs ADD COLUMN baseline_revision_id TEXT REFERENCES revisions(id);
+        ALTER TABLE run_turns ADD COLUMN result TEXT;
+      `);
+      // Individual foreign keys do not guarantee that revisions belong to the same project.
+      // Validate historical rows before adding guards, without modifying any historical content.
+      const invalid = db
+        .prepare(`
+        SELECT 1 FROM revisions r JOIN revisions p ON p.id = r.parent_id
+          WHERE r.project_id != p.project_id
+        UNION ALL
+        SELECT 1 FROM refs f JOIN revisions r ON r.id = f.head_revision_id
+          WHERE f.project_id != r.project_id
+        UNION ALL
+        SELECT 1 FROM refs f JOIN revisions r ON r.id = f.fork_base_revision_id
+          WHERE f.project_id != r.project_id LIMIT 1
+      `)
+        .get();
+      if (invalid) throw new Error("Legacy database contains cross-project revision references");
+      for (const operation of ["INSERT", "UPDATE"] as const) {
+        db.exec(`
+          CREATE TRIGGER revision_project_${operation.toLowerCase()} BEFORE ${operation} ON revisions
+          WHEN NEW.parent_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM revisions WHERE id = NEW.parent_id AND project_id = NEW.project_id)
+          BEGIN SELECT RAISE(ABORT, 'Revision parent belongs to another project'); END;
+          CREATE TRIGGER ref_project_${operation.toLowerCase()} BEFORE ${operation} ON refs
+          WHEN NOT EXISTS (
+            SELECT 1 FROM revisions WHERE id = NEW.head_revision_id AND project_id = NEW.project_id)
+            OR (NEW.fork_base_revision_id IS NOT NULL AND NOT EXISTS (
+              SELECT 1 FROM revisions WHERE id = NEW.fork_base_revision_id AND project_id = NEW.project_id))
+          BEGIN SELECT RAISE(ABORT, 'Ref revision belongs to another project'); END;
+          CREATE TRIGGER outcome_project_${operation.toLowerCase()} BEFORE ${operation} ON request_outcomes
+          WHEN NEW.project_id IS NOT NULL AND NEW.revision_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM revisions WHERE id = NEW.revision_id AND project_id = NEW.project_id)
+          BEGIN SELECT RAISE(ABORT, 'Outcome revision belongs to another project'); END;
+          CREATE TRIGGER run_project_${operation.toLowerCase()} BEFORE ${operation} ON runs
+          WHEN (NEW.revision_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM revisions WHERE id = NEW.revision_id AND project_id = NEW.project_id))
+            OR (NEW.baseline_revision_id IS NOT NULL AND NOT EXISTS (
+              SELECT 1 FROM revisions WHERE id = NEW.baseline_revision_id AND project_id = NEW.project_id))
+          BEGIN SELECT RAISE(ABORT, 'Run revision belongs to another project'); END;
+        `);
+      }
+      db.exec(`
+        CREATE TRIGGER immutable_revision BEFORE UPDATE ON revisions
+          BEGIN SELECT RAISE(ABORT, 'Revisions are immutable'); END;
+        CREATE TRIGGER immutable_fork_base BEFORE UPDATE OF fork_base_revision_id ON refs
+          WHEN OLD.fork_base_revision_id IS NOT NEW.fork_base_revision_id
+          BEGIN SELECT RAISE(ABORT, 'Fork baseline is immutable'); END;
+        CREATE TRIGGER immutable_brief BEFORE UPDATE ON briefs
+          BEGIN SELECT RAISE(ABORT, 'Brief versions are immutable'); END;
+        PRAGMA user_version = 2;
+      `);
+    }
+  });
+}
+
+/** Sorted, strict JSON, shared by persistence and command fingerprints. */
+function json(value: unknown): string {
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "number" && Number.isFinite(value)) return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(json).join(",")}]`;
+  if (typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${json(record[key])}`)
+      .join(",")}}`;
+  }
+  throw new Error("Store values must be finite JSON data");
+}
+
+function bounded(value: unknown, max = 128): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= max &&
+    [...value].every((character) => character.charCodeAt(0) >= 32)
+  );
+}
+
 export function openStore(path: string): Store {
   const db = new DatabaseSync(path);
-  db.exec("PRAGMA foreign_keys = ON;");
-  if (path !== ":memory:") db.exec("PRAGMA journal_mode = WAL;");
-  db.exec(SCHEMA);
-  return { db, close: () => db.close() };
+  try {
+    db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+    if (path !== ":memory:") db.exec("PRAGMA journal_mode = WAL;");
+    migrate(db);
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+
+  function readSnapshot(projectId: string, revisionId: string): unknown {
+    const row = db
+      .prepare("SELECT snapshot FROM revisions WHERE project_id = ? AND id = ?")
+      .get(projectId, revisionId);
+    if (!row) throw new Error("Revision not found in project");
+    return row.snapshot === null ? null : JSON.parse(String(row.snapshot));
+  }
+
+  function readState(projectId: string, ref: string): RefState | null {
+    const row = db
+      .prepare(`
+        SELECT f.head_revision_id, f.fork_base_revision_id, r.snapshot,
+          base.snapshot AS base_snapshot, b.version AS brief_version, b.body AS brief_body
+        FROM refs f JOIN revisions r ON r.id = f.head_revision_id AND r.project_id = f.project_id
+        LEFT JOIN revisions base ON base.id = f.fork_base_revision_id AND base.project_id = f.project_id
+        LEFT JOIN briefs b ON b.project_id = f.project_id AND b.version = (
+          SELECT max(version) FROM briefs WHERE project_id = f.project_id)
+        WHERE f.project_id = ? AND f.name = ?
+      `)
+      .get(projectId, ref);
+    if (!row) return null;
+    const revisionId = String(row.head_revision_id);
+    return {
+      projectId,
+      ref,
+      revisionId,
+      model: row.snapshot === null ? null : JSON.parse(String(row.snapshot)),
+      brief:
+        row.brief_version === null
+          ? { version: 0, body: null }
+          : { version: Number(row.brief_version), body: JSON.parse(String(row.brief_body)) },
+      forkBase:
+        row.fork_base_revision_id === null
+          ? null
+          : {
+              revisionId: String(row.fork_base_revision_id),
+              model: row.base_snapshot === null ? null : JSON.parse(String(row.base_snapshot)),
+            },
+    };
+  }
+
+  function execute(
+    command: Command,
+    caller: Caller,
+    evaluate?: Evaluator,
+    validateMetadata?: MetadataValidator,
+  ): CommandResult {
+    if (!bounded(caller.namespace, 256) || !["owner", "agent", "external"].includes(caller.role)) {
+      return { ok: false, code: "invalid_caller" };
+    }
+    if (
+      !["create_project", "fork_ref", "set_brief", "apply_changes"].includes(command.type) ||
+      !bounded(command.projectId) ||
+      !bounded(command.ref) ||
+      !bounded(command.requestId) ||
+      (command.type === "fork_ref" && !bounded(command.body.sourceRef)) ||
+      (command.type === "set_brief" &&
+        (!Number.isSafeInteger(command.body.baseBriefVersion) ||
+          command.body.baseBriefVersion < 0)) ||
+      (command.baseRevision !== null && !bounded(command.baseRevision))
+    ) {
+      return { ok: false, code: "invalid_command" };
+    }
+    // Caller context must come from the authenticated registry, never command arguments.
+    // Authorization precedes cached replay, including a cached owner success.
+    if (command.type !== "apply_changes" && caller.role !== "owner")
+      return { ok: false, code: "forbidden" };
+    const commandJson = json(command);
+    return transaction(db, () => {
+      const previous = db
+        .prepare(
+          "SELECT fingerprint, context, outcome FROM request_outcomes WHERE project_id = ? AND namespace = ? AND request_id = ?",
+        )
+        .get(command.projectId, caller.namespace, command.requestId);
+      const projectExists = Boolean(
+        db.prepare("SELECT 1 FROM projects WHERE id = ?").get(command.projectId),
+      );
+      const state = previous
+        ? null
+        : readState(
+            command.projectId,
+            command.type === "fork_ref" ? command.body.sourceRef : command.ref,
+          );
+      const context = previous
+        ? String(previous.context)
+        : json({ brief: state?.brief ?? null, forkBase: state?.forkBase ?? null });
+      const fingerprint = createHash("sha256")
+        .update(
+          json({
+            command: JSON.parse(commandJson),
+            role: caller.role,
+            context: JSON.parse(context),
+          }),
+        )
+        .digest("hex");
+      if (previous) {
+        if (previous.fingerprint !== fingerprint) return { ok: false, code: "request_conflict" };
+        return JSON.parse(String(previous.outcome)) as CommandResult;
+      }
+
+      const persist = (result: CommandResult): CommandResult => {
+        const outcome = json(result);
+        // Rejected creation/missing-project commands also own a key, without creating a project.
+        db.prepare(
+          "INSERT INTO request_outcomes (project_id, namespace, request_id, role, fingerprint, context, revision_id, outcome) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ).run(
+          command.projectId,
+          caller.namespace,
+          command.requestId,
+          caller.role,
+          fingerprint,
+          context,
+          result.ok ? result.revisionId : null,
+          outcome,
+        );
+        // First response and replay have exactly the same serialized representation.
+        return JSON.parse(outcome) as CommandResult;
+      };
+      const validate = (state: RefState | null) => {
+        const rejection = validateMetadata?.(state);
+        if (rejection !== undefined && rejection?.ok !== false)
+          throw new Error("Metadata validator must return a synchronous rejection or void");
+        return rejection;
+      };
+      if (command.type === "create_project") {
+        if (command.baseRevision !== null) return persist({ ok: false, code: "invalid_base" });
+        if (projectExists) return persist({ ok: false, code: "project_exists" });
+        const rejection = validate(null);
+        if (rejection) return persist(rejection);
+        const snapshot = json(command.body.model);
+        const brief = json(command.body.brief);
+        const revisionId = randomUUID();
+        const now = new Date().toISOString();
+        db.prepare("INSERT INTO projects (id, created_at) VALUES (?, ?)").run(
+          command.projectId,
+          now,
+        );
+        db.prepare(
+          "INSERT INTO revisions (id, project_id, parent_id, change_set, snapshot, created_at) VALUES (?, ?, NULL, ?, ?, ?)",
+        ).run(revisionId, command.projectId, commandJson, snapshot, now);
+        db.prepare("INSERT INTO refs (project_id, name, head_revision_id) VALUES (?, ?, ?)").run(
+          command.projectId,
+          command.ref,
+          revisionId,
+        );
+        db.prepare("INSERT INTO briefs (project_id, version, body) VALUES (?, 1, ?)").run(
+          command.projectId,
+          brief,
+        );
+        return persist({ ok: true, revisionId, briefVersion: 1, effects: [] });
+      }
+      if (!projectExists) return persist({ ok: false, code: "project_not_found" });
+      if (!state) return persist({ ok: false, code: "ref_not_found" });
+      if (command.baseRevision !== state.revisionId)
+        return persist({ ok: false, code: "stale_base" });
+      if (command.type === "fork_ref") {
+        if (readState(command.projectId, command.ref))
+          return persist({ ok: false, code: "ref_exists" });
+        const rejection = validate(state);
+        if (rejection) return persist(rejection);
+        db.prepare(
+          "INSERT INTO refs (project_id, name, head_revision_id, fork_base_revision_id) VALUES (?, ?, ?, ?)",
+        ).run(command.projectId, command.ref, state.revisionId, state.revisionId);
+        return persist({
+          ok: true,
+          revisionId: state.revisionId,
+          briefVersion: state.brief.version,
+          effects: [],
+        });
+      }
+      if (command.type === "set_brief") {
+        if (command.body.baseBriefVersion !== state.brief.version)
+          return persist({ ok: false, code: "stale_brief" });
+        const rejection = validate(state);
+        if (rejection) return persist(rejection);
+        const version = state.brief.version + 1;
+        db.prepare("INSERT INTO briefs (project_id, version, body) VALUES (?, ?, ?)").run(
+          command.projectId,
+          version,
+          json(command.body.brief),
+        );
+        return persist({
+          ok: true,
+          revisionId: state.revisionId,
+          briefVersion: version,
+          effects: [],
+        });
+      }
+      if (!evaluate) throw new Error("apply_changes requires a synchronous evaluator");
+      const candidate = evaluate(state);
+      if (!candidate || typeof candidate.ok !== "boolean")
+        throw new Error("Evaluator must return a synchronous evaluation");
+      if (!candidate.ok) return persist(candidate);
+      const snapshot = json(candidate.model);
+      const effects = JSON.parse(json(candidate.effects)) as unknown;
+      const revisionId = randomUUID();
+      db.prepare(
+        "INSERT INTO revisions (id, project_id, parent_id, change_set, snapshot, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run(
+        revisionId,
+        command.projectId,
+        state.revisionId,
+        json({ body: command.body, effects }),
+        snapshot,
+        new Date().toISOString(),
+      );
+      db.prepare("UPDATE refs SET head_revision_id = ? WHERE project_id = ? AND name = ?").run(
+        revisionId,
+        command.projectId,
+        command.ref,
+      );
+      return persist({ ok: true, revisionId, briefVersion: state.brief.version, effects });
+    });
+  }
+
+  function readRun(id: string): RunRecord | null {
+    const row = db.prepare("SELECT * FROM runs WHERE id = ?").get(id);
+    if (!row) return null;
+    return {
+      id: String(row.id),
+      projectId: String(row.project_id),
+      ref: String(row.ref),
+      status: row.status as RunRecord["status"],
+      outcome: row.outcome as RunRecord["outcome"],
+      instruction: String(row.instruction),
+      revisionId: row.revision_id === null ? null : String(row.revision_id),
+      baselineRevisionId:
+        row.baseline_revision_id === null ? null : String(row.baseline_revision_id),
+      briefVersion: Number(row.brief_version),
+      strategySeed: row.strategy_seed === null ? null : JSON.parse(String(row.strategy_seed)),
+      budget: JSON.parse(String(row.budget)),
+      retryCount: Number(row.retry_count),
+    };
+  }
+
+  function runCurrent(run: RunRecord): boolean {
+    const state = readState(run.projectId, run.ref);
+    return Boolean(
+      state &&
+        run.revisionId !== null &&
+        state.revisionId === run.revisionId &&
+        state.brief.version === run.briefVersion &&
+        (state.forkBase?.revisionId ?? null) === run.baselineRevisionId &&
+        (run.baselineRevisionId === null ||
+          readState(run.projectId, "main")?.revisionId === run.baselineRevisionId),
+    );
+  }
+
+  return {
+    db,
+    execute,
+    readState,
+    readSnapshot,
+    readRun,
+    readBriefs: (projectId) =>
+      db
+        .prepare("SELECT version, body FROM briefs WHERE project_id = ? ORDER BY version")
+        .all(projectId)
+        .map((row) => ({ version: Number(row.version), body: JSON.parse(String(row.body)) })),
+    createRun: (run) =>
+      transaction(db, () => {
+        if (!readState(run.projectId, run.ref)) throw new Error("Run ref not found in project");
+        if (
+          !db
+            .prepare("SELECT 1 FROM briefs WHERE project_id = ? AND version = ?")
+            .get(run.projectId, run.briefVersion)
+        )
+          throw new Error("Run brief version not found in project");
+        if (
+          !bounded(run.id) ||
+          run.status !== "queued" ||
+          run.outcome !== null ||
+          !Number.isSafeInteger(run.retryCount) ||
+          run.retryCount < 0
+        )
+          throw new Error("Invalid initial run");
+        if (!runCurrent(run)) throw new Error("Run pins are stale");
+        db.prepare(
+          "INSERT INTO runs (id, project_id, ref, status, outcome, instruction, brief_version, strategy_seed, budget, retry_count, revision_id, baseline_revision_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ).run(
+          run.id,
+          run.projectId,
+          run.ref,
+          run.status,
+          run.outcome,
+          run.instruction,
+          run.briefVersion,
+          json(run.strategySeed),
+          json(run.budget),
+          run.retryCount,
+          run.revisionId,
+          run.baselineRevisionId,
+        );
+      }),
+    updateRun: (id, patch) =>
+      transaction(db, () => {
+        const run = readRun(id);
+        if (!run) throw new Error("Run not found");
+        if (run.status !== "queued" && run.status !== "running")
+          throw new Error("Run already finished");
+        if ((patch.status as string) === "done") throw new Error("Use finalizeRun for outcomes");
+        if (
+          patch.retryCount !== undefined &&
+          (!Number.isSafeInteger(patch.retryCount) || patch.retryCount < 0)
+        )
+          throw new Error("Invalid retry count");
+        db.prepare("UPDATE runs SET status = ?, retry_count = ? WHERE id = ?").run(
+          patch.status ?? run.status,
+          patch.retryCount ?? run.retryCount,
+          id,
+        );
+      }),
+    finalizeRun: (id, outcome) =>
+      transaction(db, () => {
+        const run = readRun(id);
+        if (!run) return { ok: false, code: "run_not_found" };
+        if (!runCurrent(run)) return { ok: false, code: "stale_run" };
+        if (run.status === "done" && run.outcome === outcome)
+          return {
+            ok: true,
+            revisionId: run.revisionId as string,
+            briefVersion: run.briefVersion,
+            effects: [],
+          };
+        if (run.status !== "queued" && run.status !== "running")
+          return { ok: false, code: "run_finished" };
+        db.prepare("UPDATE runs SET status = 'done', outcome = ? WHERE id = ?").run(outcome, id);
+        return {
+          ok: true,
+          revisionId: run.revisionId as string,
+          briefVersion: run.briefVersion,
+          effects: [],
+        };
+      }),
+    saveRunTurn: (turn) =>
+      transaction(db, () => {
+        if (!Number.isSafeInteger(turn.turn) || turn.turn < 0)
+          throw new Error("Invalid turn number");
+        const transcript = json(turn.transcript);
+        const result = json(turn.result);
+        const spend = json(turn.spend);
+        if (
+          Buffer.byteLength(transcript) + Buffer.byteLength(result) + Buffer.byteLength(spend) >
+          MAX_RUN_TURN_BYTES
+        )
+          throw new Error("Run turn exceeds byte limit");
+        db.prepare(
+          "INSERT INTO run_turns (run_id, turn, transcript, result, spend) VALUES (?, ?, ?, ?, ?)",
+        ).run(turn.runId, turn.turn, transcript, result, spend);
+      }),
+    readRunTurns: (runId) =>
+      db
+        .prepare("SELECT * FROM run_turns WHERE run_id = ? ORDER BY turn")
+        .all(runId)
+        .map((row) => ({
+          runId: String(row.run_id),
+          turn: Number(row.turn),
+          transcript: JSON.parse(String(row.transcript)),
+          result: row.result === null ? null : JSON.parse(String(row.result)),
+          spend: JSON.parse(String(row.spend)),
+        })),
+    close: () => db.close(),
+  };
 }
