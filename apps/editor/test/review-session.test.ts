@@ -1,13 +1,29 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReviewSession } from "../src/review-session.ts";
-import { reviewFixture } from "./fixtures.ts";
+import { acceptanceFixture, reviewFixture } from "./fixtures.ts";
 
 const inputs = { projectId: "synthetic-project", ref: "option-a", token: "synthetic-owner-token" };
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("review session", () => {
+  it("binds native browser fetch to the global receiver", async () => {
+    const fetcher = vi.fn<typeof fetch>(function (this: unknown) {
+      if (this !== globalThis) throw new TypeError("Illegal invocation");
+      return Promise.resolve(response(reviewFixture()));
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const session = new ReviewSession();
+    session.setInputs(inputs);
+    await session.review();
+    expect(session.getSnapshot().review?.option.revisionId).toBe("option-head-29");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it.each(["projectId", "ref", "token"] as const)(
     "ignores a late review after %s changes",
     async (field) => {
@@ -75,13 +91,6 @@ describe("review session", () => {
   it("freezes exact intent, blocks double clicks/new reviews, and retries after token clearing", async () => {
     const sent = Promise.withResolvers<void>();
     const pending = Promise.withResolvers<Response>();
-    const receipt = {
-      ok: true,
-      revisionId: "accepted-31",
-      briefVersion: 7,
-      effects: [],
-      acceptance: { requestId: "receipt-id" },
-    };
     const fetcher = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(response(reviewFixture()))
@@ -89,7 +98,9 @@ describe("review session", () => {
         sent.resolve();
         return pending.promise;
       })
-      .mockResolvedValueOnce(response(receipt));
+      .mockImplementationOnce((_url, init) =>
+        Promise.resolve(response(acceptanceFixture(JSON.parse(init?.body as string)))),
+      );
     const session = new ReviewSession(fetcher);
     session.setInputs(inputs);
     await session.review();
@@ -133,8 +144,42 @@ describe("review session", () => {
       credentials: "omit",
       headers: { Authorization: `Bearer ${inputs.token}`, "Content-Type": "application/json" },
     });
-    expect(session.getSnapshot().acceptance).toMatchObject({ status: "resolved", result: receipt });
+    expect(session.getSnapshot().acceptance).toMatchObject({
+      status: "resolved",
+      result: acceptanceFixture(JSON.parse(firstBody as string)),
+    });
     expect(session.getSnapshot().review).toBeUndefined();
+  });
+
+  it("retains the original target and receipt when inputs are edited before a late success", async () => {
+    const sent = Promise.withResolvers<void>();
+    const pending = Promise.withResolvers<Response>();
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(response(reviewFixture()))
+      .mockImplementationOnce(() => {
+        sent.resolve();
+        return pending.promise;
+      });
+    const session = new ReviewSession(fetcher);
+    session.setInputs(inputs);
+    await session.review();
+    const accepting = session.accept();
+    await sent.promise;
+    const intent = session.getSnapshot().acceptance?.intent;
+    if (!intent) throw new Error("Missing acceptance intent");
+    session.setInputs({ projectId: "different-project", ref: "different-ref", token: "" });
+    await session.review();
+    pending.resolve(response(acceptanceFixture(intent.input)));
+    await accepting;
+    expect(session.getSnapshot().acceptance).toEqual({
+      status: "resolved",
+      intent,
+      result: acceptanceFixture(intent.input),
+    });
+    expect(session.getSnapshot().inputs.token).toBe("");
+    expect(session.getSnapshot().review).toBeUndefined();
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
   it.each(["unauthorized", "forbidden", "store_unavailable", "invalid_input", "request_conflict"])(
@@ -150,7 +195,14 @@ describe("review session", () => {
             init?.signal?.addEventListener("abort", () => reject(new Error("timeout"))),
           );
         })
-        .mockResolvedValueOnce(response({ ok: false, code }, 401));
+        .mockResolvedValueOnce(
+          code === "unauthorized"
+            ? response({ error: "unauthorized" }, 401)
+            : response({ ok: false, code }),
+        )
+        .mockImplementationOnce((_url, init) =>
+          Promise.resolve(response(acceptanceFixture(JSON.parse(init?.body as string)))),
+        );
       const session = new ReviewSession(fetcher);
       session.setInputs(inputs);
       await session.review();
@@ -163,6 +215,10 @@ describe("review session", () => {
       const intent = session.getSnapshot().acceptance?.intent;
       await session.retry();
       expect(session.getSnapshot().acceptance).toMatchObject({ status: "uncertain", intent });
+      await session.retry();
+      expect(session.getSnapshot().acceptance).toMatchObject({ status: "resolved", intent });
+      expect(fetcher.mock.calls[2]?.[1]?.body).toBe(fetcher.mock.calls[1]?.[1]?.body);
+      expect(fetcher.mock.calls[3]?.[1]?.body).toBe(fetcher.mock.calls[1]?.[1]?.body);
     },
   );
 

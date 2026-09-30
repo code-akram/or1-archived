@@ -35,7 +35,7 @@ export class ReviewSession {
   private listeners = new Set<() => void>();
   private fetcher: typeof fetch;
 
-  constructor(fetcher: typeof fetch = fetch) {
+  constructor(fetcher: typeof fetch = globalThis.fetch.bind(globalThis)) {
     this.fetcher = fetcher;
   }
 

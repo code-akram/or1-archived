@@ -147,6 +147,10 @@ export function App() {
           {acceptance.status === "uncertain" && (
             <>
               <p>
+                The reply was lost or unavailable. Acceptance may already have committed; retry this
+                exact request to learn its outcome, rather than starting another acceptance.
+              </p>
+              <p>
                 This intent is retained even if inputs or the token are cleared. Re-enter the same
                 owner token to retry; edited project/ref fields cannot retarget it. Do not close or
                 reload this page: the unresolved intent is held only in memory.

@@ -1,5 +1,10 @@
 import { derive, scorecard } from "@or1/core";
-import type { PlanReview, ReviewOptionSuccess } from "@or1/tools";
+import type {
+  AcceptOptionInput,
+  AcceptOptionSuccess,
+  PlanReview,
+  ReviewOptionSuccess,
+} from "@or1/tools";
 import { connectedPlan, testFitBrief } from "../../../packages/core/test/scorecard-fixtures.ts";
 
 /** Public synthetic core fixture, with actual derived geometry and scorecards. */
@@ -25,5 +30,23 @@ export function reviewFixture(ref = "option-a"): ReviewOptionSuccess {
     main: plan(main, "main-head-13"),
     option: plan(option, "option-head-29"),
     eligibility: { allowed: true },
+  };
+}
+
+export function acceptanceFixture(input: AcceptOptionInput): AcceptOptionSuccess {
+  return {
+    ok: true,
+    revisionId: "accepted-31",
+    briefVersion: input.body.briefVersion,
+    effects: [],
+    acceptance: {
+      ...input.body,
+      schemaVersion: 1,
+      projectId: input.projectId,
+      previousMainRevisionId: input.baseRevision,
+      requestId: input.requestId,
+      actor: { role: "owner", namespace: "local-owner" },
+      scorecard: reviewFixture().option.scorecard,
+    },
   };
 }
