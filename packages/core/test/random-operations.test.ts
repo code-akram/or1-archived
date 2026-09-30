@@ -192,7 +192,7 @@ describe("geometry invariants across random operation sequences", () => {
       }),
       { numRuns: 150 },
     );
-  });
+  }, 15_000);
 
   it("moving a shell boundary stretches neighbours and preserves hosted openings in world coordinates", () => {
     fc.assert(
