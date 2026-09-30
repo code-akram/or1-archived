@@ -1,0 +1,23 @@
+{
+  "name": "@or1/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "HTTP + SSE API, MCP server and run orchestrator (pi agents).",
+  "scripts": {
+    "dev": "node --watch src/main.ts",
+    "start": "node src/main.ts",
+    "typecheck": "tsc -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.99.1",
+    "@earendil-works/pi-ai": "0.99.1",
+    "@modelcontextprotocol/node": "2.1.0",
+    "@modelcontextprotocol/server": "2.2.0",
+    "@or1/core": "workspace:*",
+    "@or1/store": "workspace:*",
+    "@or1/tools": "workspace:*",
+    "typebox": "1.3.27"
+  }
+}

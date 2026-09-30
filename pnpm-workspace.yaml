@@ -1,0 +1,16 @@
+packages:
+  - packages/*
+  - apps/*
+
+# Dependency lifecycle scripts are reviewed explicitly.
+allowBuilds:
+  esbuild: true # verifies its platform binary
+  '@google/genai': false # preinstall is a no-op
+  protobufjs: false # postinstall is a version check, not needed
+
+# pi 0.99.1 was released 2026-09-29 and is pinned deliberately (see notes/tech-stack.md).
+minimumReleaseAgeExclude:
+  - '@earendil-works/chord@0.99.1'
+  - '@earendil-works/pi-agent-core@0.99.1'
+  - '@earendil-works/pi-ai@0.99.1'
+  - '@earendil-works/pi-telemetry@0.99.1'

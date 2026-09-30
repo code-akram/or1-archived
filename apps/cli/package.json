@@ -1,0 +1,20 @@
+{
+  "name": "@or1/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "or1 CLI: the tool registry as commands, for scripting, evals and fixtures.",
+  "bin": {
+    "or1": "./src/main.ts"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "typecheck": "tsc -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@or1/core": "workspace:*",
+    "@or1/store": "workspace:*",
+    "@or1/tools": "workspace:*"
+  }
+}

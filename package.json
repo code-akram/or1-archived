@@ -1,0 +1,25 @@
+{
+  "name": "or1",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@11.26.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "check": "biome check . && pnpm -r --parallel typecheck",
+    "format": "biome check --write .",
+    "typecheck": "pnpm -r --parallel typecheck",
+    "test": "pnpm -r test",
+    "dev:server": "pnpm --filter @or1/server dev",
+    "dev:editor": "pnpm --filter @or1/editor dev",
+    "or1": "pnpm --filter @or1/cli start"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.14",
+    "@types/node": "24.19.0",
+    "typescript": "7.0.2",
+    "vitest": "5.0.2"
+  }
+}

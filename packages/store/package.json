@@ -1,0 +1,17 @@
+{
+  "name": "@or1/store",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "SQLite store (node:sqlite): revisions, refs, briefs, redlines, runs, request outcomes.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@or1/core": "workspace:*"
+  }
+}

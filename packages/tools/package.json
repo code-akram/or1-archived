@@ -1,0 +1,18 @@
+{
+  "name": "@or1/tools",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Tool registry: one TypeBox definition set for pi agents, MCP, HTTP and the CLI.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@or1/core": "workspace:*",
+    "typebox": "1.3.27"
+  }
+}

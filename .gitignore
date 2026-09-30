@@ -1,0 +1,21 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Secrets: only the example file is tracked.
+.env*
+!.env.example
+
+# Project data, eval runs and private evidence live in ~/.local/share/or1, never here.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+evidence/
+traces/
+renders/
+eval-runs/
+
+.DS_Store
