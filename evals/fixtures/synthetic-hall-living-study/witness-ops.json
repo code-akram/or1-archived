@@ -1,0 +1,34 @@
+[
+  {
+    "op": "add_wall",
+    "start": { "x": 2000, "y": 0 },
+    "end": { "x": 2000, "y": 7000 },
+    "thickness": 100
+  },
+  {
+    "op": "add_wall",
+    "start": { "x": 2000, "y": 4000 },
+    "end": { "x": 10000, "y": 4000 },
+    "thickness": 100
+  },
+  { "op": "add_door", "wall": "W5", "offset": 1500, "width": 900, "swing": "right" },
+  { "op": "add_door", "wall": "W5", "offset": 5000, "width": 800, "swing": "right" },
+  {
+    "op": "tag_space",
+    "space": { "x": 1000, "y": 3000 },
+    "program": "hall",
+    "requirementId": "hall"
+  },
+  {
+    "op": "tag_space",
+    "space": { "x": 6000, "y": 2000 },
+    "program": "living",
+    "requirementId": "living"
+  },
+  {
+    "op": "tag_space",
+    "space": { "x": 6000, "y": 5500 },
+    "program": "study",
+    "requirementId": "study"
+  }
+]

@@ -1,0 +1,112 @@
+{
+  "schemaVersion": 2,
+  "walls": [
+    {
+      "id": "W1",
+      "start": {
+        "x": 0,
+        "y": 0
+      },
+      "end": {
+        "x": 11000,
+        "y": 0
+      },
+      "thickness": 200,
+      "locked": true,
+      "structural": false
+    },
+    {
+      "id": "W2",
+      "start": {
+        "x": 11000,
+        "y": 0
+      },
+      "end": {
+        "x": 11000,
+        "y": 8000
+      },
+      "thickness": 200,
+      "locked": true,
+      "structural": false
+    },
+    {
+      "id": "W3",
+      "start": {
+        "x": 11000,
+        "y": 8000
+      },
+      "end": {
+        "x": 0,
+        "y": 8000
+      },
+      "thickness": 200,
+      "locked": true,
+      "structural": false
+    },
+    {
+      "id": "W4",
+      "start": {
+        "x": 0,
+        "y": 8000
+      },
+      "end": {
+        "x": 0,
+        "y": 0
+      },
+      "thickness": 200,
+      "locked": true,
+      "structural": false
+    }
+  ],
+  "openings": [
+    {
+      "id": "O1",
+      "wall": "W4",
+      "offset": 5300,
+      "width": 900,
+      "locked": true,
+      "kind": "door",
+      "hinge": "start",
+      "swing": "left",
+      "entrance": true
+    },
+    {
+      "id": "O2",
+      "wall": "W2",
+      "offset": 1600,
+      "width": 1600,
+      "locked": true,
+      "kind": "window"
+    },
+    {
+      "id": "O3",
+      "wall": "W3",
+      "offset": 1800,
+      "width": 1200,
+      "locked": true,
+      "kind": "window"
+    },
+    {
+      "id": "O4",
+      "wall": "W3",
+      "offset": 5000,
+      "width": 1600,
+      "locked": true,
+      "kind": "window"
+    }
+  ],
+  "spaces": [
+    {
+      "id": "S1",
+      "anchor": {
+        "x": 1,
+        "y": 1
+      }
+    }
+  ],
+  "next": {
+    "wall": 5,
+    "opening": 5,
+    "space": 2
+  }
+}

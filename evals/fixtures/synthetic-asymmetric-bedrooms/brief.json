@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 2,
+  "name": "Synthetic asymmetric bedrooms with distinct access",
+  "rooms": [
+    { "id": "hall", "program": "hall", "quantity": 1, "hard": true, "targetAreaM2": 15.99 },
+    {
+      "id": "living",
+      "program": "living",
+      "quantity": 1,
+      "hard": true,
+      "targetAreaM2": 37.6275,
+      "habitable": true
+    },
+    {
+      "id": "bedroom_large",
+      "program": "bedroom",
+      "quantity": 1,
+      "hard": true,
+      "targetAreaM2": 16.415,
+      "habitable": true
+    },
+    {
+      "id": "bedroom_small",
+      "program": "bedroom",
+      "quantity": 1,
+      "hard": true,
+      "targetAreaM2": 12.2275,
+      "habitable": true
+    }
+  ],
+  "constraints": [
+    {
+      "kind": "min_area",
+      "target": { "kind": "requirement", "id": "hall" },
+      "areaM2": 15.9,
+      "hard": true
+    },
+    {
+      "kind": "min_area",
+      "target": { "kind": "requirement", "id": "living" },
+      "areaM2": 37,
+      "hard": true
+    },
+    {
+      "kind": "min_area",
+      "target": { "kind": "requirement", "id": "bedroom_large" },
+      "areaM2": 16,
+      "hard": true
+    },
+    {
+      "kind": "min_area",
+      "target": { "kind": "requirement", "id": "bedroom_small" },
+      "areaM2": 12,
+      "hard": true
+    },
+    {
+      "kind": "adjacent",
+      "a": { "kind": "requirement", "id": "living" },
+      "b": { "kind": "requirement", "id": "hall" },
+      "via": "door",
+      "hard": true
+    },
+    {
+      "kind": "adjacent",
+      "a": { "kind": "requirement", "id": "bedroom_large" },
+      "b": { "kind": "requirement", "id": "hall" },
+      "via": "door",
+      "hard": true
+    },
+    {
+      "kind": "adjacent",
+      "a": { "kind": "requirement", "id": "bedroom_small" },
+      "b": { "kind": "requirement", "id": "living" },
+      "via": "door",
+      "hard": true
+    },
+    { "kind": "daylight", "target": { "kind": "requirement", "id": "living" }, "hard": true },
+    {
+      "kind": "daylight",
+      "target": { "kind": "requirement", "id": "bedroom_large" },
+      "hard": true
+    },
+    { "kind": "daylight", "target": { "kind": "requirement", "id": "bedroom_small" }, "hard": true }
+  ]
+}

@@ -1,0 +1,47 @@
+[
+  {
+    "op": "add_wall",
+    "start": { "x": 2200, "y": 0 },
+    "end": { "x": 2200, "y": 8000 },
+    "thickness": 100
+  },
+  {
+    "op": "add_wall",
+    "start": { "x": 2200, "y": 4500 },
+    "end": { "x": 11000, "y": 4500 },
+    "thickness": 100
+  },
+  {
+    "op": "add_wall",
+    "start": { "x": 7200, "y": 4500 },
+    "end": { "x": 7200, "y": 8000 },
+    "thickness": 100
+  },
+  { "op": "add_door", "wall": "W5", "offset": 1800, "width": 900, "swing": "right" },
+  { "op": "add_door", "wall": "W5", "offset": 5900, "width": 800, "swing": "right" },
+  { "op": "add_door", "wall": "W6", "offset": 6500, "width": 800, "swing": "left" },
+  {
+    "op": "tag_space",
+    "space": { "x": 1000, "y": 3000 },
+    "program": "hall",
+    "requirementId": "hall"
+  },
+  {
+    "op": "tag_space",
+    "space": { "x": 6000, "y": 2000 },
+    "program": "living",
+    "requirementId": "living"
+  },
+  {
+    "op": "tag_space",
+    "space": { "x": 4500, "y": 6000 },
+    "program": "bedroom",
+    "requirementId": "bedroom_large"
+  },
+  {
+    "op": "tag_space",
+    "space": { "x": 9000, "y": 6000 },
+    "program": "bedroom",
+    "requirementId": "bedroom_small"
+  }
+]

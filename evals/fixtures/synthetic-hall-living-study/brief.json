@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 2,
+  "name": "Synthetic hall, living room and study",
+  "rooms": [
+    { "id": "hall", "program": "hall", "quantity": 1, "hard": true, "targetAreaM2": 12.58 },
+    {
+      "id": "living",
+      "program": "living",
+      "quantity": 1,
+      "hard": true,
+      "targetAreaM2": 30.2225,
+      "habitable": true
+    },
+    {
+      "id": "study",
+      "program": "study",
+      "quantity": 1,
+      "hard": true,
+      "targetAreaM2": 22.3725,
+      "habitable": true
+    }
+  ],
+  "constraints": [
+    {
+      "kind": "min_area",
+      "target": { "kind": "requirement", "id": "hall" },
+      "areaM2": 12,
+      "hard": true
+    },
+    {
+      "kind": "min_area",
+      "target": { "kind": "requirement", "id": "living" },
+      "areaM2": 30,
+      "hard": true
+    },
+    {
+      "kind": "min_area",
+      "target": { "kind": "requirement", "id": "study" },
+      "areaM2": 22,
+      "hard": true
+    },
+    {
+      "kind": "adjacent",
+      "a": { "kind": "requirement", "id": "living" },
+      "b": { "kind": "requirement", "id": "hall" },
+      "via": "door",
+      "hard": true
+    },
+    {
+      "kind": "adjacent",
+      "a": { "kind": "requirement", "id": "study" },
+      "b": { "kind": "requirement", "id": "hall" },
+      "via": "door",
+      "hard": true
+    },
+    { "kind": "daylight", "target": { "kind": "requirement", "id": "living" }, "hard": true },
+    { "kind": "daylight", "target": { "kind": "requirement", "id": "study" }, "hard": true }
+  ]
+}
