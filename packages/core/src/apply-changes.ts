@@ -1,8 +1,10 @@
 import { Value } from "typebox/value";
+import { type Brief, bindingProblems, validateBrief } from "./brief.ts";
 import { type Derived, derive, spaceAt } from "./derive.ts";
 import { equal } from "./equal.ts";
 import { type Problem, wallAxis, wallDirection } from "./geometry.ts";
 import { reconcileSpaces, type SpaceEffect } from "./identity.ts";
+import { InputError, LIMITS, limit, modelLimits, wallLimits } from "./limits.ts";
 import {
   type Door,
   idNumber,
@@ -12,6 +14,7 @@ import {
   type Point,
   type SpaceId,
   type SpaceRecord,
+  validateModel,
   type Wall,
   type WallId,
 } from "./model.ts";
@@ -46,7 +49,14 @@ export type Effect =
     };
 
 export type Rejection = {
-  readonly reason: "invalid_op" | "not_found" | "forbidden" | "invalid_geometry";
+  readonly reason:
+    | "invalid_op"
+    | "not_found"
+    | "forbidden"
+    | "invalid_geometry"
+    | "invalid_binding"
+    | "invalid_input"
+    | "limit_exceeded";
   readonly detail: string;
   /** Index of the op at fault, when one op is. */
   readonly op?: number;
@@ -68,10 +78,33 @@ export type ApplyResult =
  * store. Order: schema → ops on a draft → role policy on the complete candidate → space identity →
  * contract check → space tags.
  */
-export function applyChanges(model: Model, ops: readonly Op[], role: Role): ApplyResult {
+export function applyChanges(
+  model: Model,
+  ops: readonly Op[],
+  role: Role,
+  brief?: Brief,
+): ApplyResult {
+  try {
+    validateModel(model);
+    if (brief) validateBrief(brief);
+    limit(ops.length <= LIMITS.operations, "operation batch limit");
+    return evaluateChanges(model, ops, role, brief);
+  } catch (error) {
+    if (error instanceof InputError) return reject(error.code, error.message);
+    throw error;
+  }
+}
+
+function evaluateChanges(model: Model, ops: readonly Op[], role: Role, brief?: Brief): ApplyResult {
   for (const [index, op] of ops.entries()) {
     const problem = schemaProblem(op);
     if (problem) return reject("invalid_op", `op ${index}: ${problem}`, index);
+    for (const [key, v] of Object.entries(op)) {
+      if (typeof v === "number")
+        limit(Number.isSafeInteger(v) && Math.abs(v) <= LIMITS.dimension, `${key} dimension limit`);
+      if ((key === "id" || key === "wall") && typeof v === "string")
+        limit(idNumber(v) < LIMITS.id, "element ID limit");
+    }
   }
 
   const draft: Draft = {
@@ -85,6 +118,13 @@ export function applyChanges(model: Model, ops: readonly Op[], role: Role): Appl
   for (const [index, op] of ops.entries()) {
     const failure = execute(draft, op, index);
     if (failure) return reject(failure.reason, `op ${index} (${op.op}): ${failure.detail}`, index);
+    wallLimits([...draft.walls.values()]);
+    modelLimits({
+      ...model,
+      walls: [...draft.walls.values()],
+      openings: [...draft.openings.values()],
+      next: draft.next,
+    });
   }
 
   const walls = [...draft.walls.values()].sort((a, b) => idNumber(a.id) - idNumber(b.id));
@@ -96,7 +136,7 @@ export function applyChanges(model: Model, ops: readonly Op[], role: Role): Appl
 
   const identity = reconcileSpaces(model, walls);
   let candidate: Model = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     walls,
     openings,
     spaces: [...identity.spaces],
@@ -124,13 +164,19 @@ export function applyChanges(model: Model, ops: readonly Op[], role: Role): Appl
     const byId = new Map(tagged.map((r) => [r.id, r]));
     derived = {
       ...derived,
-      spaces: derived.spaces.map(({ label: _l, program: _p, ...space }) => ({
+      spaces: derived.spaces.map(({ label: _l, program: _p, requirementId: _r, ...space }) => ({
         ...space,
         ...tagsOf(byId.get(space.id)),
       })),
     };
   }
 
+  modelLimits(candidate);
+  if (brief) {
+    const problems = bindingProblems(candidate, brief);
+    if (problems.length > 0)
+      return reject("invalid_binding", problems[0]?.detail ?? "invalid requirement binding");
+  }
   const before = new Map(derive(model).spaces.map((s) => [s.id, s.netArea]));
   for (const space of derived.spaces) {
     const from = before.get(space.id);
@@ -405,18 +451,34 @@ function applyTags(
       }
       id = at;
     }
-    const { label: oldLabel, program: oldProgram, ...rest } = records.get(id) as SpaceRecord;
+    const {
+      label: oldLabel,
+      program: oldProgram,
+      requirementId: oldRequirement,
+      ...rest
+    } = records.get(id) as SpaceRecord;
     const label = op.label === undefined ? oldLabel : (op.label ?? undefined);
     const program = op.program === undefined ? oldProgram : (op.program ?? undefined);
-    records.set(id, { ...rest, ...tagsOf({ label, program }) });
+    const requirementId =
+      op.requirementId === undefined ? oldRequirement : (op.requirementId ?? undefined);
+    records.set(id, { ...rest, ...tagsOf({ label, program, requirementId }) });
   }
   return [...records.values()];
 }
 
-function tagsOf(record: { label?: string | undefined; program?: string | undefined } | undefined) {
+function tagsOf(
+  record:
+    | {
+        label?: string | undefined;
+        program?: string | undefined;
+        requirementId?: string | undefined;
+      }
+    | undefined,
+) {
   return {
     ...(record?.label !== undefined ? { label: record.label } : {}),
     ...(record?.program !== undefined ? { program: record.program } : {}),
+    ...(record?.requirementId !== undefined ? { requirementId: record.requirementId } : {}),
   };
 }
 

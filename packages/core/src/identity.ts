@@ -1,6 +1,7 @@
 import { faceAnchor, faceSet, wallCoordinates } from "./derive.ts";
 import { wallAxis } from "./geometry.ts";
 import { cellArea, cellAt, makeGrid } from "./grid.ts";
+import { wallLimits } from "./limits.ts";
 import { idNumber, type Model, type SpaceId, type SpaceRecord, type Wall } from "./model.ts";
 
 export type SpaceEffect =
@@ -11,6 +12,7 @@ export type SpaceEffect =
       readonly into?: SpaceId;
       readonly label?: string;
       readonly program?: string;
+      readonly requirementId?: string;
     };
 
 export type Reconciled = {
@@ -31,6 +33,8 @@ export type Reconciled = {
  * 4. Greedy assignment in rank order. Unmatched new faces get fresh IDs; unmatched records retire.
  */
 export function reconcileSpaces(before: Model, walls: readonly Wall[]): Reconciled {
+  wallLimits(before.walls);
+  wallLimits(walls);
   const oldWalls = before.walls.filter((w) => wallAxis(w));
   const newWalls = walls.filter((w) => wallAxis(w));
   const a = wallCoordinates(oldWalls);
@@ -143,6 +147,7 @@ export function reconcileSpaces(before: Model, walls: readonly Wall[]): Reconcil
       ...(into ? { into } : {}),
       ...(record.label ? { label: record.label } : {}),
       ...(record.program ? { program: record.program } : {}),
+      ...(record.requirementId ? { requirementId: record.requirementId } : {}),
     });
   }
   spaces.sort((p, q) => idNumber(p.id) - idNumber(q.id));

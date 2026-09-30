@@ -20,6 +20,7 @@ const failed = (model: Model, brief: Brief = testFitBrief, original = base) =>
     .gates.filter((g) => !g.passed)
     .map((g) => g.gate);
 const withConstraints = (constraints: Constraint[]): Brief => ({ ...testFitBrief, constraints });
+const p = (program: string) => ({ kind: "program" as const, program });
 
 describe("labelled scorecard fixtures and brief schema", () => {
   it.each(scorecardFixtures)("$name", ({ feasible, brief, failedGates }) => {
@@ -36,12 +37,14 @@ describe("labelled scorecard fixtures and brief schema", () => {
 
   it("rejects invalid room counts, dimensions, programs and unknown fields", () => {
     for (const room of [
-      { program: "living", hard: true, count: 0 },
+      { program: "living", hard: true, quantity: 0 },
       { program: "Living room", hard: true },
       { program: "living", hard: true, targetAreaM2: 0 },
       { program: "living", hard: true, extra: true },
     ]) {
-      expect(Value.Check(BriefSchema, { ...testFitBrief, rooms: [room] })).toBe(false);
+      expect(
+        Value.Check(BriefSchema, { ...testFitBrief, rooms: [{ id: "r", quantity: 1, ...room }] }),
+      ).toBe(false);
     }
     expect(Value.Check(BriefSchema, { ...testFitBrief, thresholds: { doorWidth: 800.5 } })).toBe(
       false,
@@ -57,7 +60,11 @@ describe("hard gates cannot be offset by perfect soft scores", () => {
     "rejects duplicate space IDs across distinct faces (reversed=%s)",
     (reversed) => {
       const isolated = accept(base, [{ op: "remove_opening", id: "O2" }]).model;
-      const brief: Brief = { schemaVersion: 1, rooms: [], constraints: [] };
+      const brief: Brief = {
+        ...testFitBrief,
+        rooms: testFitBrief.rooms.map((r) => ({ ...r, hard: false })),
+        constraints: [],
+      };
       expect(failed(isolated, brief, isolated)).toEqual(["reachable"]);
       const records = reversed ? [...isolated.spaces].reverse() : isolated.spaces;
       const aliased: Model = {
@@ -137,9 +144,9 @@ describe("hard gates cannot be offset by perfect soft scores", () => {
     const brief: Brief = {
       ...testFitBrief,
       rooms: [
-        { program: "living", count: 2, hard: true },
-        { program: "study", hard: false },
-        { program: "corridor", hard: false },
+        { id: "living", program: "living", quantity: 2, hard: true },
+        { id: "study", program: "study", quantity: 1, hard: false },
+        { id: "corridor", program: "corridor", quantity: 1, hard: false },
       ],
     };
     const result = scorecard(base, brief, base);
@@ -236,13 +243,13 @@ describe("hard gates cannot be offset by perfect soft scores", () => {
       { op: "tag_space", space: { x: 1000, y: 1000 }, program: "corridor" },
     ]).model;
     // Passage over the spur: 3900 - 3100 = 800 mm, despite a 5800 × 3800 bounding box.
-    expect(failed(plan, { schemaVersion: 1, rooms: [], constraints: [] }, plan)).toEqual([
+    expect(failed(plan, { schemaVersion: 2, rooms: [], constraints: [] }, plan)).toEqual([
       "corridor_width",
     ]);
     expect(
       failed(
         plan,
-        { schemaVersion: 1, rooms: [], constraints: [], thresholds: { corridorWidth: 800 } },
+        { schemaVersion: 2, rooms: [], constraints: [], thresholds: { corridorWidth: 800 } },
         plan,
       ),
     ).toEqual([]);
@@ -251,16 +258,16 @@ describe("hard gates cannot be offset by perfect soft scores", () => {
 
 describe("hard and soft constraints", () => {
   it.each([
-    [{ kind: "min_area", program: "corridor", areaM2: 16.53, hard: true }, true],
-    [{ kind: "max_area", program: "corridor", areaM2: 16.53, hard: true }, true],
-    [{ kind: "min_area", program: "living", areaM2: 28.13, hard: true }, true],
-    [{ kind: "min_area", program: "living", areaM2: 28.130001, hard: true }, false],
-    [{ kind: "max_area", program: "living", areaM2: 28.13, hard: true }, true],
-    [{ kind: "max_area", program: "living", areaM2: 28.129999, hard: true }, false],
-    [{ kind: "min_width", program: "living", width: 4850, hard: true }, true],
-    [{ kind: "min_width", program: "living", width: 4851, hard: true }, false],
-    [{ kind: "daylight", program: "living", hard: true }, true],
-    [{ kind: "daylight", program: "corridor", hard: true }, false],
+    [{ kind: "min_area", target: p("corridor"), areaM2: 16.53, hard: true }, true],
+    [{ kind: "max_area", target: p("corridor"), areaM2: 16.53, hard: true }, true],
+    [{ kind: "min_area", target: p("living"), areaM2: 28.13, hard: true }, true],
+    [{ kind: "min_area", target: p("living"), areaM2: 28.130001, hard: true }, false],
+    [{ kind: "max_area", target: p("living"), areaM2: 28.13, hard: true }, true],
+    [{ kind: "max_area", target: p("living"), areaM2: 28.129999, hard: true }, false],
+    [{ kind: "min_width", target: p("living"), width: 4850, hard: true }, true],
+    [{ kind: "min_width", target: p("living"), width: 4851, hard: true }, false],
+    [{ kind: "daylight", target: p("living"), hard: true }, true],
+    [{ kind: "daylight", target: p("corridor"), hard: true }, false],
   ] satisfies [Constraint, boolean][])("%j: met = %s", (constraint, met) => {
     const result = scorecard(base, withConstraints([constraint]), base);
     expect(result.constraints[0]?.met).toBe(met);
@@ -275,8 +282,8 @@ describe("hard and soft constraints", () => {
   it("wall adjacency survives removal of a door; door adjacency does not", () => {
     const model = accept(base, [{ op: "remove_opening", id: "O2" }]).model;
     const brief = withConstraints([
-      { kind: "adjacent", a: "living", b: "corridor", via: "wall", hard: false },
-      { kind: "adjacent", a: "living", b: "corridor", via: "door", hard: false },
+      { kind: "adjacent", a: p("living"), b: p("corridor"), via: "wall", hard: false },
+      { kind: "adjacent", a: p("living"), b: p("corridor"), via: "door", hard: false },
     ]);
     expect(scorecard(model, brief, base).constraints.map((c) => c.met)).toEqual([true, false]);
     expect(scorecard(model, brief, base).scores).toContainEqual(
@@ -287,11 +294,11 @@ describe("hard and soft constraints", () => {
   it("checks every matching space, not just one, and never passes vacuously for missing programs", () => {
     const both = accept(base, [{ op: "tag_space", space: "S1", program: "living" }]).model;
     const constraints: Constraint[] = [
-      { kind: "min_area", program: "living", areaM2: 20, hard: true },
-      { kind: "min_area", program: "missing", areaM2: 1, hard: true },
-      { kind: "adjacent", a: "living", b: "missing", via: "wall", hard: true },
-      { kind: "adjacent", a: "missing", b: "living", via: "door", hard: true },
-      { kind: "adjacent", a: "living", b: "living", via: "door", hard: true },
+      { kind: "min_area", target: p("living"), areaM2: 20, hard: true },
+      { kind: "min_area", target: p("missing"), areaM2: 1, hard: true },
+      { kind: "adjacent", a: p("living"), b: p("missing"), via: "wall", hard: true },
+      { kind: "adjacent", a: p("missing"), b: p("living"), via: "door", hard: true },
+      { kind: "adjacent", a: p("living"), b: p("living"), via: "door", hard: true },
     ];
     const result = scorecard(both, withConstraints(constraints), base);
     expect(result.constraints.map((c) => c.met)).toEqual([false, false, false, false, true]);
@@ -311,8 +318,8 @@ describe("hard and soft constraints", () => {
       expect.objectContaining({ score: "daylight", value: 0 }),
     );
     const brief: Brief = {
-      schemaVersion: 1,
-      rooms: [{ program: "bedroom", hard: false, habitable: true }],
+      schemaVersion: 2,
+      rooms: [{ id: "bedroom", program: "bedroom", quantity: 1, hard: false, habitable: true }],
       constraints: [],
     };
     expect(scorecard(base, brief, base).scores).toContainEqual(
@@ -324,14 +331,16 @@ describe("hard and soft constraints", () => {
 describe("area fit", () => {
   const plan = connectedPlan();
   const corridor = spaceIdAt(plan.derived, 1000, 3000);
-  const both = accept(plan.model, [{ op: "tag_space", space: corridor, program: "living" }]).model;
+  const both = accept(plan.model, [
+    { op: "tag_space", space: corridor, program: "living", requirementId: "living" },
+  ]).model;
 
   it("uses closest surplus spaces, caps deviation, and charges each missing instance", () => {
     const brief: Brief = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       rooms: [
-        { program: "living", count: 3, hard: false, targetAreaM2: 20 },
-        { program: "study", hard: false, targetAreaM2: 5 },
+        { id: "living", program: "living", quantity: 3, hard: false, targetAreaM2: 20 },
+        { id: "study", program: "study", quantity: 1, hard: false, targetAreaM2: 5 },
       ],
       constraints: [],
     };
@@ -339,16 +348,22 @@ describe("area fit", () => {
     expect(
       scorecard(both, brief, base).scores.find((s) => s.score === "area_fit")?.value,
     ).toBeCloseTo(0.355);
-    const one = { ...brief, rooms: [{ program: "living", hard: false, targetAreaM2: 20 }] };
+    const one: Brief = {
+      ...brief,
+      rooms: [{ id: "living", program: "living", quantity: 1, hard: false, targetAreaM2: 20 }],
+    };
     expect(
       scorecard(both, one, base).scores.find((s) => s.score === "area_fit")?.value,
     ).toBeCloseTo(0.8265);
-    const tiny = { ...brief, rooms: [{ program: "living", hard: false, targetAreaM2: 1 }] };
+    const tiny: Brief = {
+      ...brief,
+      rooms: [{ id: "living", program: "living", quantity: 1, hard: false, targetAreaM2: 1 }],
+    };
     expect(scorecard(both, tiny, base).scores.find((s) => s.score === "area_fit")?.value).toBe(0);
   });
 
   it("omits scores that have no brief inputs and leaves both inputs untouched", () => {
-    const brief: Brief = { schemaVersion: 1, rooms: [], constraints: [] };
+    const brief: Brief = { schemaVersion: 2, rooms: [], constraints: [] };
     const beforeModel: Model = JSON.parse(JSON.stringify(base));
     const beforeBrief: Brief = JSON.parse(JSON.stringify(brief));
     expect(scorecard(base, brief, base).scores).toEqual([]);

@@ -25,6 +25,7 @@ import {
   traceRings,
 } from "./grid.ts";
 import type { Model, OpeningId, Point, SpaceId, SpaceRecord, Wall, WallId } from "./model.ts";
+import { validateModel } from "./model.ts";
 
 export type SpaceRef = SpaceId | "exterior";
 
@@ -32,6 +33,7 @@ export type DerivedSpace = {
   readonly id: SpaceId;
   readonly label?: string;
   readonly program?: string;
+  readonly requirementId?: string;
   readonly anchor: Point;
   /** Area inside the bounding wall centrelines, mm². */
   readonly grossArea: number;
@@ -159,6 +161,7 @@ export function wallCoordinates(
 
 /** Derives the geometry of a model: junctions, spaces, adjacencies, opening sides, slab and problems. */
 export function derive(model: Model): Derived {
+  validateModel(model);
   const walls = model.walls.filter((w) => wallAxis(w));
   const graph = wallGraph(walls);
   const coords = wallCoordinates(walls, graph);

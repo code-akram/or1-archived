@@ -1,4 +1,5 @@
 import { wallAxis } from "./geometry.ts";
+import { LIMITS, limit } from "./limits.ts";
 import type { Point, Wall } from "./model.ts";
 
 /**
@@ -24,6 +25,10 @@ export function makeGrid(xs: Iterable<number>, ys: Iterable<number>): Grid {
   };
   const gx = pad(xs);
   const gy = pad(ys);
+  limit(
+    Math.max(0, gx.length - 1) * Math.max(0, gy.length - 1) <= LIMITS.gridCells,
+    "grid cell limit",
+  );
   return { xs: gx, ys: gy, nx: Math.max(0, gx.length - 1), ny: Math.max(0, gy.length - 1) };
 }
 
@@ -93,6 +98,7 @@ export function labelFaces(grid: Grid, bars: Barriers): Faces {
   for (let start = 0; start < nx * ny; start++) {
     if (label[start] !== -1) continue;
     const id = count++;
+    limit(count <= LIMITS.spaces + 1, "bounded face limit");
     label[start] = id;
     stack.push(start);
     while (stack.length > 0) {
@@ -202,6 +208,10 @@ export function narrowArea(grid: Grid, inside: (c: number) => boolean, width: nu
   const nx = xs.length - 1;
   const ny = ys.length - 1;
   if (nx <= 0 || ny <= 0) return 0;
+  limit(
+    (nx * (nx + 1) * ny * (ny + 1)) / 4 <= LIMITS.widthRectangles,
+    "width rectangle work limit",
+  );
   const cells = new Uint8Array(nx * ny);
   for (let j = 0; j < ny; j++) {
     for (let i = 0; i < nx; i++) {

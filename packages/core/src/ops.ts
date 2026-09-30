@@ -5,6 +5,7 @@ import {
   OpeningIdSchema,
   PointSchema,
   ProgramSchema,
+  RequirementIdSchema,
   SpaceIdSchema,
   WallIdSchema,
 } from "./model.ts";
@@ -80,6 +81,7 @@ export const TagSpaceSchema = op("tag_space", {
   /** Omit to keep, null to clear. */
   label: nullable(LabelSchema),
   program: nullable(ProgramSchema),
+  requirementId: nullable(RequirementIdSchema),
 });
 
 export const OpSchema = Type.Union([

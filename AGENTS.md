@@ -4,7 +4,7 @@ Rules for humans and agents working in this repo.
 
 ## Architecture invariants
 
-- **One write path.** Every change to project state goes through `applyChanges` in `@or1/core`, called via the tool registry, with a base revision, a request ID and a caller role. Nothing writes to the store directly.
+- **One write path.** Geometry/tag changes go through `applyChanges` in `@or1/core`, called via the tool registry. Project creation, ref creation and brief edits use metadata commands through the same registry/store transaction boundary, not fake geometry ops. Every mutation has a base revision, a scoped request ID and a credential-derived role. Adapters never write SQL directly; run-ledger writes use the store's bounded persistence API.
 - **The core is pure.** `packages/core` has no IO, no Node APIs and no browser APIs. It runs in the server, the browser replica and the CLI.
 - **One tool definition set.** Tools are defined once in `packages/tools` with TypeBox schemas. pi `AgentTool`s, MCP tools (via `fromJsonSchema`), HTTP handlers and CLI commands are generated from it. Never redeclare a tool's schema in an adapter.
 - **Roles come from credentials,** not from which interface a call arrives through. MCP callers are `external`; in-app runs are `agent`; the CLI defaults to `agent`.

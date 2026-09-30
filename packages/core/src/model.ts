@@ -1,4 +1,6 @@
 import { type Static, type TSchema, Type } from "typebox";
+import { Value } from "typebox/value";
+import { InputError, LIMITS, limit, modelLimits } from "./limits.ts";
 
 /**
  * The persisted model. Walls and openings are authoritative; spaces are persistent records whose
@@ -70,16 +72,25 @@ export type Opening = Static<typeof OpeningSchema>;
 /** Programme tags are snake_case keys shared with the brief, e.g. `bedroom`, `corridor`. */
 export const ProgramSchema = Type.String({ pattern: "^[a-z][a-z0-9_]*$", maxLength: 64 });
 export const LabelSchema = Type.String({ minLength: 1, maxLength: 80 });
+export const RequirementIdSchema = Type.String({
+  pattern: "^[a-zA-Z][a-zA-Z0-9_-]*$",
+  maxLength: 64,
+});
 
 /**
  * A persistent space record. `anchor` is derived state kept so the record can be matched to its face:
  * a point strictly inside the face, rewritten by apply_changes after every edit.
  */
-export const SpaceRecordSchema = strict({
+const spaceProperties = {
   id: SpaceIdSchema,
   anchor: PointSchema,
   label: Type.Optional(LabelSchema),
   program: Type.Optional(ProgramSchema),
+};
+export const LegacySpaceRecordSchema = strict(spaceProperties);
+export const SpaceRecordSchema = strict({
+  ...spaceProperties,
+  requirementId: Type.Optional(RequirementIdSchema),
 });
 export type SpaceRecord = Static<typeof SpaceRecordSchema>;
 
@@ -90,18 +101,49 @@ export const CountersSchema = strict({
   space: Type.Integer({ minimum: 1 }),
 });
 
-export const ModelSchema = strict({
-  schemaVersion: Type.Literal(1),
+const modelProperties = {
   walls: Type.Array(WallSchema),
   openings: Type.Array(OpeningSchema),
-  spaces: Type.Array(SpaceRecordSchema),
   next: CountersSchema,
+};
+export const LegacyModelSchema = strict({
+  schemaVersion: Type.Literal(1),
+  ...modelProperties,
+  spaces: Type.Array(LegacySpaceRecordSchema),
+});
+export const ModelSchema = strict({
+  schemaVersion: Type.Literal(2),
+  ...modelProperties,
+  spaces: Type.Array(SpaceRecordSchema),
 });
 export type Model = Static<typeof ModelSchema>;
 
+export function validateModel(value: unknown): asserts value is Model {
+  if (typeof value === "object" && value !== null) {
+    const m = value as Record<string, unknown>;
+    for (const [key, max] of [
+      ["walls", LIMITS.walls],
+      ["openings", LIMITS.openings],
+      ["spaces", LIMITS.spaces],
+    ] as const) {
+      if (Array.isArray(m[key])) limit(m[key].length <= max, `too many ${key}`);
+    }
+  }
+  if (!Value.Check(ModelSchema, value)) throw new InputError("invalid_input", "invalid v2 model");
+  modelLimits(value);
+  for (const [kind, records] of [
+    ["wall", value.walls],
+    ["opening", value.openings],
+    ["space", value.spaces],
+  ] as const) {
+    if (records.some((r) => idNumber(r.id) >= value.next[kind]))
+      throw new InputError("invalid_input", `${kind} counter must exceed issued IDs`);
+  }
+}
+
 export function emptyModel(): Model {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     walls: [],
     openings: [],
     spaces: [],

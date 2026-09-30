@@ -1,4 +1,5 @@
 import { GEOMETRY } from "./contract.ts";
+import { LIMITS, limit } from "./limits.ts";
 import type { Model, Opening, Point, Wall, WallId } from "./model.ts";
 
 /** A rule violation. `subjects` lists the element IDs involved, for highlighting and agent feedback. */
@@ -189,6 +190,7 @@ export function wallGraph(walls: readonly Wall[]): WallGraph {
         from: (points[k - 1] as { point: Point }).point,
         to: (points[k] as { point: Point }).point,
       });
+      limit(segments.length <= LIMITS.segments, "wall graph segment limit");
     }
   }
 

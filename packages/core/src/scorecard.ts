@@ -1,19 +1,23 @@
 import {
   type Brief,
+  bindingProblems,
   type Constraint,
   DEFAULT_CIRCULATION,
   DEFAULT_THRESHOLDS,
   DEFAULT_UNREACHABLE,
+  type Target,
+  validateBrief,
 } from "./brief.ts";
 import { type Derived, type DerivedSpace, derive, narrowPart, type SpaceRef } from "./derive.ts";
 import { equal } from "./equal.ts";
 import { pointAlong, type Rect, rectOverlap, wallDirection } from "./geometry.ts";
-import type { Model, SpaceId, Wall } from "./model.ts";
+import { type Model, type SpaceId, validateModel, type Wall } from "./model.ts";
 
 /** Hard gates, in evaluation order. An option is valid only if every gate passes. */
 export const GATES = [
   "topology",
   "protected_intact",
+  "requirement_bindings",
   "required_rooms",
   "reachable",
   "corridor_width",
@@ -27,6 +31,7 @@ export type Finding = { readonly detail: string; readonly subjects: readonly str
 
 export type GateResult = {
   readonly gate: GateName;
+  readonly basis: "concept_design_check" | "concept_design_heuristic";
   readonly passed: boolean;
   readonly failures: readonly Finding[];
 };
@@ -50,10 +55,18 @@ export type ScoreResult = {
 };
 
 export type Scorecard = {
+  readonly evaluatorVersion: "2.0";
+  readonly certification: "none";
   readonly valid: boolean;
   readonly gates: readonly GateResult[];
   readonly constraints: readonly ConstraintResult[];
   readonly scores: readonly ScoreResult[];
+  readonly requirements: readonly {
+    id: string;
+    quantity: number;
+    present: number;
+    spaces: readonly SpaceId[];
+  }[];
 };
 
 /**
@@ -61,6 +74,8 @@ export type Scorecard = {
  * locked and structural elements must be intact. Establishes validity and consistency, not quality.
  */
 export function scorecard(model: Model, brief: Brief, base: Model): Scorecard {
+  validateBrief(brief);
+  validateModel(base);
   const derived = derive(model);
   const ctx = context(model, brief, derived);
   const constraints = brief.constraints.map((c, index) => evaluate(c, index, ctx));
@@ -71,6 +86,7 @@ export function scorecard(model: Model, brief: Brief, base: Model): Scorecard {
       derived.problems.map((p) => ({ detail: p.detail, subjects: p.subjects })),
     ),
     gate("protected_intact", protectedFailures(model, base)),
+    gate("requirement_bindings", bindingProblems(model, brief)),
     gate("required_rooms", roomFailures(brief, ctx, true)),
     gate("reachable", reachFailures(ctx)),
     gate("corridor_width", corridorFailures(ctx)),
@@ -103,8 +119,10 @@ export function scorecard(model: Model, brief: Brief, base: Model): Scorecard {
       detail: `${met} of ${soft.length} soft constraints met`,
     });
   }
-  const habitable = new Set(brief.rooms.filter((r) => r.habitable).map((r) => r.program));
-  const habitableSpaces = derived.spaces.filter((s) => s.program && habitable.has(s.program));
+  const habitable = new Set(brief.rooms.filter((r) => r.habitable).map((r) => r.id));
+  const habitableSpaces = [...ctx.byRequirement]
+    .filter(([id]) => habitable.has(id))
+    .flatMap(([, spaces]) => spaces);
   if (habitable.size > 0) {
     const lit = habitableSpaces.filter((s) => ctx.daylit.has(s.id)).length;
     scores.push({
@@ -114,13 +132,27 @@ export function scorecard(model: Model, brief: Brief, base: Model): Scorecard {
     });
   }
 
-  return { valid: gates.every((g) => g.passed), gates, constraints, scores };
+  return {
+    evaluatorVersion: "2.0",
+    certification: "none",
+    valid: gates.every((g) => g.passed),
+    gates,
+    constraints,
+    scores,
+    requirements: brief.rooms.map((r) => ({
+      id: r.id,
+      quantity: r.quantity,
+      present: ctx.byRequirement.get(r.id)?.length ?? 0,
+      spaces: (ctx.byRequirement.get(r.id) ?? []).map((s) => s.id),
+    })),
+  };
 }
 
 type Context = {
   readonly model: Model;
   readonly derived: Derived;
   readonly byProgram: ReadonlyMap<string, readonly DerivedSpace[]>;
+  readonly byRequirement: ReadonlyMap<string, readonly DerivedSpace[]>;
   readonly walls: ReadonlyMap<string, Wall>;
   readonly daylit: ReadonlySet<SpaceId>;
   readonly thresholds: { corridorWidth: number; doorWidth: number; entranceDoorWidth: number };
@@ -130,9 +162,17 @@ type Context = {
 
 function context(model: Model, brief: Brief, derived: Derived): Context {
   const byProgram = new Map<string, DerivedSpace[]>();
+  const byRequirement = new Map<string, DerivedSpace[]>();
+  const rooms = new Map(brief.rooms.map((r) => [r.id, r]));
   for (const space of derived.spaces) {
     if (space.program)
       byProgram.set(space.program, [...(byProgram.get(space.program) ?? []), space]);
+    if (space.requirementId && rooms.get(space.requirementId)?.program === space.program) {
+      byRequirement.set(space.requirementId, [
+        ...(byRequirement.get(space.requirementId) ?? []),
+        space,
+      ]);
+    }
   }
   const windows = new Set(model.openings.filter((o) => o.kind === "window").map((o) => o.id));
   const daylit = new Set<SpaceId>();
@@ -145,6 +185,7 @@ function context(model: Model, brief: Brief, derived: Derived): Context {
     model,
     derived,
     byProgram,
+    byRequirement,
     walls: new Map(model.walls.map((w) => [w.id, w])),
     daylit,
     thresholds: { ...DEFAULT_THRESHOLDS, ...brief.thresholds },
@@ -154,7 +195,15 @@ function context(model: Model, brief: Brief, derived: Derived): Context {
 }
 
 function gate(name: GateName, failures: readonly Finding[]): GateResult {
-  return { gate: name, passed: failures.length === 0, failures };
+  return {
+    gate: name,
+    basis:
+      name === "corridor_width" || name === "door_clearance"
+        ? "concept_design_heuristic"
+        : "concept_design_check",
+    passed: failures.length === 0,
+    failures,
+  };
 }
 
 function protectedFailures(model: Model, base: Model): Finding[] {
@@ -197,10 +246,14 @@ function roomFailures(brief: Brief, ctx: Context, hard: boolean): Finding[] {
   const failures: Finding[] = [];
   for (const room of brief.rooms) {
     if (room.hard !== hard) continue;
-    const want = room.count ?? 1;
-    const have = ctx.byProgram.get(room.program)?.length ?? 0;
+    const want = room.quantity;
+    const spaces = ctx.byRequirement.get(room.id) ?? [];
+    const have = spaces.length;
     if (have < want) {
-      failures.push({ detail: `${room.program}: ${have} of ${want} present`, subjects: [] });
+      failures.push({
+        detail: `${room.id} (${room.program}): ${have} of ${want} present`,
+        subjects: [room.id, ...spaces.map((s) => s.id)],
+      });
     }
   }
   return failures;
@@ -319,34 +372,40 @@ function evaluate(c: Constraint, index: number, ctx: Context): ConstraintResult 
 
 function constraintFailures(c: Constraint, ctx: Context): Finding[] {
   const label = `constraint ${c.kind}`;
-  const spacesOf = (program: string) => ctx.byProgram.get(program) ?? [];
-  const none = (program: string): Finding[] => [
-    { detail: `${label}: no space is tagged ${program}`, subjects: [] },
+  const nameOf = (t: Target) => (t.kind === "program" ? t.program : t.id);
+  const spacesOf = (t: Target) =>
+    t.kind === "program"
+      ? (ctx.byProgram.get(t.program) ?? [])
+      : (ctx.byRequirement.get(t.id) ?? []);
+  const none = (target: Target): Finding[] => [
+    { detail: `${label}: no space for ${nameOf(target)}`, subjects: [nameOf(target)] },
   ];
-  const each = (program: string, fails: (s: DerivedSpace) => string | undefined): Finding[] => {
-    const spaces = spacesOf(program);
-    if (spaces.length === 0) return none(program);
+  const each = (target: Target, fails: (s: DerivedSpace) => string | undefined): Finding[] => {
+    const spaces = spacesOf(target);
+    if (spaces.length === 0) return none(target);
     return spaces.flatMap((s) => {
       const why = fails(s);
-      return why ? [{ detail: `${label}: ${s.id} (${program}) ${why}`, subjects: [s.id] }] : [];
+      return why
+        ? [{ detail: `${label}: ${s.id} (${nameOf(target)}) ${why}`, subjects: [s.id] }]
+        : [];
     });
   };
   switch (c.kind) {
     case "min_area":
-      return each(c.program, (s) =>
+      return each(c.target, (s) =>
         s.netArea / 1e6 < c.areaM2 ? `has ${m2(s.netArea)} m², needs ≥ ${c.areaM2} m²` : undefined,
       );
     case "max_area":
-      return each(c.program, (s) =>
+      return each(c.target, (s) =>
         s.netArea / 1e6 > c.areaM2 ? `has ${m2(s.netArea)} m², allows ≤ ${c.areaM2} m²` : undefined,
       );
     case "min_width":
-      return each(c.program, (s) => {
+      return each(c.target, (s) => {
         const narrow = narrowPart(ctx.derived, s.id, c.width);
         return narrow > 0 ? `has ${m2(narrow)} m² narrower than ${c.width} mm` : undefined;
       });
     case "daylight":
-      return each(c.program, (s) =>
+      return each(c.target, (s) =>
         ctx.daylit.has(s.id) ? undefined : "has no window to the exterior",
       );
     case "adjacent": {
@@ -365,7 +424,7 @@ function constraintFailures(c: Constraint, ctx: Context): Finding[] {
             (x === s.id && targets.has(y) && y !== s.id) ||
             (y === s.id && targets.has(x) && x !== s.id),
         );
-        return touches ? undefined : `does not share a ${c.via} with a ${c.b}`;
+        return touches ? undefined : `does not share a ${c.via} with ${nameOf(c.b)}`;
       });
     }
   }
@@ -379,10 +438,10 @@ function areaFit(rooms: Brief["rooms"], ctx: Context): ScoreResult {
   const deviations: number[] = [];
   for (const room of rooms) {
     const target = room.targetAreaM2 as number;
-    const devs = (ctx.byProgram.get(room.program) ?? [])
+    const devs = (ctx.byRequirement.get(room.id) ?? [])
       .map((s) => Math.min(1, Math.abs(s.netArea / 1e6 - target) / target))
       .sort((a, b) => a - b);
-    for (let k = 0; k < (room.count ?? 1); k++) deviations.push(devs[k] ?? 1);
+    for (let k = 0; k < room.quantity; k++) deviations.push(devs[k] ?? 1);
   }
   const mean = deviations.reduce((a, b) => a + b, 0) / deviations.length;
   return {

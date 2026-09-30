@@ -1,6 +1,6 @@
 # V0 geometry contract
 
-This specifies the implemented schema-version-1 core, not the future editor or store. Sources:
+This specifies the implemented schema-version-2 core, not the future editor or store. Sources:
 `src/model.ts`, `contract.ts`, `geometry.ts`, `grid.ts`, `derive.ts`, `identity.ts`, and
 `apply-changes.ts`. Hard fixtures live in `test/geometry-contract.test.ts` and
 `test/identity.test.ts`; fast-check sequences live in `test/random-operations.test.ts`.
@@ -25,10 +25,16 @@ This specifies the implemented schema-version-1 core, not the future editor or s
 - End nodes, collinear joints (including thickness changes), L, T, and X junctions are supported.
   Crossings subdivide the derived graph without splitting the authoritative wall or issuing new IDs.
 
-These constants are exported as `GEOMETRY`. The implementation uses JavaScript numbers, not bigint;
-exact integer areas assume coordinates and arithmetic remain within the safe-integer range. There
-are no enforced project-extent or wall-count limits yet; this is not a numerical/resource boundary
-for arbitrary untrusted models.
+Geometry constants are exported as `GEOMETRY`; the conservative execution envelope is `LIMITS`.
+Coordinates are bounded to ±1,000,000 mm, dimensions to 2,000,000 mm, IDs/counters to 1,000,000,
+and models to 128 walls, 256 openings and 256 spaces. Batches contain at most 256 operations.
+Post-operation draft coordinates and counters are checked before reconciliation. Grids are bounded
+to 65,536 cells before allocation, graphs to 512 segments before pairwise clearance, and bounded
+faces to 256 before identity allocation; width checks to 2,000,000 candidate rectangles before enumeration.
+This keeps intermediate mm² arithmetic safely below JavaScript's exact-integer limit. These are
+first-workflow safety bounds, not promised production capacity. Rejection is `limit_exceeded`;
+synchronous allocation is not left to a run timeout. Shared schemas and semantic validation are
+mandatory at every integration boundary, including internal agent tools.
 
 ## Faces, clear floor, openings, and slab
 
@@ -79,7 +85,7 @@ one-to-one, and greedy; it is not a global optimal matching:
    the fallback for walls removed and redrawn with fresh IDs.
 4. Rank by shared-key count descending, overlap area descending, old numeric space ID ascending,
    then new face scan order (lowest Y, then leftmost X). Assign if neither face is already matched.
-5. Matched faces retain the old ID, label, and program. Unmatched new faces get fresh IDs in scan
+5. Matched faces retain the old ID, label, program, and requirement assignment. Unmatched new faces get fresh IDs in scan
    order, with **no inherited tags**. Unmatched old records retire.
 
 Boundary continuity beats floor overlap, so moving a partition can preserve both room IDs even
@@ -91,19 +97,22 @@ does not retain identity, even if wall IDs survive.
 
 `space_created.from` and `space_retired.into` report the largest positive-overlap predecessor or
 successor, if any; equal-overlap lineage ties use common-grid scan order. These fields are explanatory,
-not promises of identity retention or tag transfer. Retirement reports the lost label/program.
+not promises of identity retention or tag transfer. Retirement reports the lost label/program/requirementId.
 Disappearance into the exterior has no successor. Reappearance gets a **new ID**: no resurrection.
 Wall, opening, and space counters are monotonic. Explicit wall/opening IDs must be at least the next
 counter and advance it; deleted IDs and skipped suffixes cannot be reused in that model lineage.
 
 ## Edit operations and atomicity
 
-`applyChanges(model, ops, role)` validates each op with the shared TypeBox schema, executes ops in
+`applyChanges(model, ops, role, brief?)` validates each op with the shared TypeBox schema, executes ops in
 order on a private draft, checks role policy on the complete candidate, reconciles space identity,
 checks geometry, and finally applies space tags. It never mutates its inputs. A failed op, forbidden
 indirect effect, invalid candidate geometry, or failed tag rejects the **whole batch**, including ID
 allocation. Intermediate geometry may be invalid if the final candidate is valid, but per-op checks
 (such as missing IDs, collapsed moves, or direction-changing resizes) still run immediately.
+The registry must supply the current validated brief: final requirement bindings must exist and
+match their program, but unmet quantities/constraints do not block intermediate editing. The pure
+geometry-only API may omit the brief; scorecard validation still reports invalid bindings.
 
 | Operation | Behavior and indirect effects |
 |---|---|
@@ -119,7 +128,8 @@ allocation. Intermediate geometry may be invalid if the final candidate is valid
 
 Success returns the candidate model, derived geometry, and effects for additions, stretched walls,
 cascaded opening removals, created/retired spaces, and retained spaces whose net area changed.
-Rejection reasons are `invalid_op`, `not_found`, `forbidden`, and `invalid_geometry`, with diagnostics
+Rejection reasons are `invalid_op`, `not_found`, `forbidden`, `invalid_geometry`, `invalid_binding`,
+`invalid_input`, and `limit_exceeded`, with diagnostics
 and subjects where available. Effects describe execution/lineage, not a minimal persisted diff.
 
 Roles come from credentials supplied by the adapter. `agent` and `external` have the same policy:
@@ -137,5 +147,5 @@ World-position locking would be a different policy, not the current contract.
 
 The pure core does not persist, authenticate, enforce base revisions, or deduplicate request IDs.
 Those belong to the registry/store transaction around this evaluator, which must take a base revision,
-request ID, and credential-derived role. Input models must already be schema-valid and derived-valid;
-`checkModel` checks geometric consistency, not the complete JSON schema or counter history.
+request ID, and credential-derived role. Schema and resource validation precede derivation;
+`checkModel` additionally checks geometric consistency. History and permissions remain transaction concerns.
