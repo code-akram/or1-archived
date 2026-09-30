@@ -1,0 +1,21 @@
+{
+  "name": "@or1/cloudflare",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@or1/core": "workspace:*",
+    "@or1/store": "workspace:*",
+    "@or1/tools": "workspace:*",
+    "jose": "6.2.12"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260926.1",
+    "esbuild": "0.28.1",
+    "miniflare": "5.20260926.0-alpha"
+  }
+}
