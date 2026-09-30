@@ -270,6 +270,53 @@ describe("pre-allocation safety envelope", () => {
       narrowArea(grid, (c) => ((c % grid.nx) + Math.floor(c / grid.nx)) % 2 === 0, 100),
     ).toThrow(/width rectangle work limit/);
   });
+  it("reserves width work across calls and across the complete scorecard", () => {
+    const grid = makeGrid([0, 100], [0, 100]);
+    const work = { remaining: 2 };
+    const inside = (c: number) => c === grid.nx + 1;
+    expect(narrowArea(grid, inside, 100, work)).toBe(0);
+    expect(work.remaining).toBe(1);
+    expect(narrowArea(grid, inside, 101, work)).toBe(10000);
+    expect(work.remaining).toBe(0);
+    expect(() => narrowArea(grid, inside, 100, work)).toThrow(/width rectangle work limit/);
+    const complex = build([
+      ...box(0, 0, 12000, 12000),
+      ...Array.from({ length: 10 }, (_, i) =>
+        wall([(i + 1) * 1000, 0], [(i + 1) * 1000, (i + 1) * 1000]),
+      ),
+      { op: "tag_space", space: "S1", program: "study" },
+    ]).model;
+    const one: Brief = {
+      schemaVersion: 2,
+      rooms: [],
+      constraints: [
+        {
+          kind: "min_width",
+          target: { kind: "program", program: "study" },
+          width: 100,
+          hard: true,
+        },
+      ],
+    };
+    expect(() => scorecard(complex, one, complex)).not.toThrow();
+    const before = JSON.stringify([complex, one]);
+    expect(() =>
+      scorecard(
+        complex,
+        {
+          ...one,
+          constraints: Array.from({ length: LIMITS.constraints }, (_, i) => ({
+            kind: "min_width",
+            target: { kind: "program", program: "study" },
+            width: 100 + i,
+            hard: true,
+          })),
+        },
+        complex,
+      ),
+    ).toThrow(/width rectangle work limit/);
+    expect(JSON.stringify([complex, one])).toBe(before);
+  });
   it("rejects dense junction graphs and excessive face counts before expensive derivation", () => {
     const walls: Wall[] = [];
     for (let i = 0; i < 23; i++) {

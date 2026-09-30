@@ -201,17 +201,24 @@ export function traceRings(grid: Grid, inside: (c: number) => boolean): Ring[] {
  * `width`. Zero means the region is at least `width` wide everywhere. Exact: maximal rectangles of a
  * rectilinear region have edges on its own boundary coordinates, so only those are enumerated.
  */
-export function narrowArea(grid: Grid, inside: (c: number) => boolean, width: number): number {
+export function narrowArea(
+  grid: Grid,
+  inside: (c: number) => boolean,
+  width: number,
+  work: { remaining: number } = { remaining: LIMITS.widthRectangles },
+): number {
   const rings = traceRings(grid, inside);
   const xs = [...new Set(rings.flatMap((r) => r.map((p) => p.x)))].sort((a, b) => a - b);
   const ys = [...new Set(rings.flatMap((r) => r.map((p) => p.y)))].sort((a, b) => a - b);
   const nx = xs.length - 1;
   const ny = ys.length - 1;
   if (nx <= 0 || ny <= 0) return 0;
+  const rectangles = (nx * (nx + 1) * ny * (ny + 1)) / 4;
   limit(
-    (nx * (nx + 1) * ny * (ny + 1)) / 4 <= LIMITS.widthRectangles,
+    rectangles <= LIMITS.widthRectangles && rectangles <= work.remaining,
     "width rectangle work limit",
   );
+  work.remaining -= rectangles;
   const cells = new Uint8Array(nx * ny);
   for (let j = 0; j < ny; j++) {
     for (let i = 0; i < nx; i++) {

@@ -286,11 +286,16 @@ export function checkModel(model: Model): readonly Problem[] {
 }
 
 /** Area of a space's clear floor that is narrower than `width` (0 if it is at least that wide everywhere). */
-export function narrowPart(derived: Derived, space: SpaceId, width: number): number {
+export function narrowPart(
+  derived: Derived,
+  space: SpaceId,
+  width: number,
+  work?: { remaining: number },
+): number {
   const { grid, faces, covered, faceOf } = derived.raster;
   const f = faceOf.get(space);
   if (f === undefined) return 0;
-  return narrowArea(grid, (c) => faces.label[c] === f && !covered[c], width);
+  return narrowArea(grid, (c) => faces.label[c] === f && !covered[c], width, work);
 }
 
 /** The space or exterior containing a point, or undefined if the point is inside a wall body. */

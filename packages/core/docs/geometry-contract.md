@@ -30,7 +30,9 @@ Coordinates are bounded to ±1,000,000 mm, dimensions to 2,000,000 mm, IDs/count
 and models to 128 walls, 256 openings and 256 spaces. Batches contain at most 256 operations.
 Post-operation draft coordinates and counters are checked before reconciliation. Grids are bounded
 to 65,536 cells before allocation, graphs to 512 segments before pairwise clearance, and bounded
-faces to 256 before identity allocation; width checks to 2,000,000 candidate rectangles before enumeration.
+faces to 256 before identity allocation. Width checks reserve work before enumeration, with at most
+2,000,000 candidate rectangles across the **entire scorecard** (all width constraints and circulation
+spaces), not a fresh allowance per space/constraint. Standalone `narrowPart` has the same per-call cap.
 This keeps intermediate mm² arithmetic safely below JavaScript's exact-integer limit. These are
 first-workflow safety bounds, not promised production capacity. Rejection is `limit_exceeded`;
 synchronous allocation is not left to a run timeout. Shared schemas and semantic validation are

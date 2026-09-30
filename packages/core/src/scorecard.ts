@@ -11,6 +11,7 @@ import {
 import { type Derived, type DerivedSpace, derive, narrowPart, type SpaceRef } from "./derive.ts";
 import { equal } from "./equal.ts";
 import { pointAlong, type Rect, rectOverlap, wallDirection } from "./geometry.ts";
+import { LIMITS } from "./limits.ts";
 import { type Model, type SpaceId, validateModel, type Wall } from "./model.ts";
 
 /** Hard gates, in evaluation order. An option is valid only if every gate passes. */
@@ -158,6 +159,7 @@ type Context = {
   readonly thresholds: { corridorWidth: number; doorWidth: number; entranceDoorWidth: number };
   readonly circulation: ReadonlySet<string>;
   readonly unreachable: ReadonlySet<string>;
+  readonly widthWork: { remaining: number };
 };
 
 function context(model: Model, brief: Brief, derived: Derived): Context {
@@ -191,6 +193,7 @@ function context(model: Model, brief: Brief, derived: Derived): Context {
     thresholds: { ...DEFAULT_THRESHOLDS, ...brief.thresholds },
     circulation: new Set(brief.circulation ?? DEFAULT_CIRCULATION),
     unreachable: new Set(brief.unreachable ?? DEFAULT_UNREACHABLE),
+    widthWork: { remaining: LIMITS.widthRectangles },
   };
 }
 
@@ -304,7 +307,7 @@ function corridorFailures(ctx: Context): Finding[] {
   return ctx.derived.spaces
     .filter((s) => s.program && ctx.circulation.has(s.program))
     .flatMap((s) => {
-      const narrow = narrowPart(ctx.derived, s.id, width);
+      const narrow = narrowPart(ctx.derived, s.id, width, ctx.widthWork);
       return narrow === 0
         ? []
         : [
@@ -401,7 +404,7 @@ function constraintFailures(c: Constraint, ctx: Context): Finding[] {
       );
     case "min_width":
       return each(c.target, (s) => {
-        const narrow = narrowPart(ctx.derived, s.id, c.width);
+        const narrow = narrowPart(ctx.derived, s.id, c.width, ctx.widthWork);
         return narrow > 0 ? `has ${m2(narrow)} m² narrower than ${c.width} mm` : undefined;
       });
     case "daylight":
