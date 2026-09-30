@@ -11,8 +11,21 @@ const [configPath, tokenPath] = process.argv.slice(2);
 if (!configPath || !tokenPath || process.argv.length !== 4)
   throw new Error("Usage: node deploy/cloudflare/provision.mjs CONFIG.json PRIVATE_TOKEN_FILE");
 const config = JSON.parse(await readFile(configPath, "utf8"));
-if (config.name !== "or1" || config.vars?.PROVISIONER_ENABLED !== "true")
-  throw new Error("Expected the or1 config with provisioning explicitly enabled");
+const expectedOrigin =
+  config.name === "or1"
+    ? "https://or1.orfloat.com"
+    : config.name === "or1-dev"
+      ? "https://or1-dev.orfloat.com"
+      : undefined;
+if (
+  !expectedOrigin ||
+  config.vars?.PUBLIC_ORIGIN !== expectedOrigin ||
+  config.vars?.PROVISIONER_ENABLED !== "true" ||
+  (config.name === "or1-dev" &&
+    (config.vars?.DEVELOPMENT_REVIEW_BYPASS !== "true" ||
+      config.vars?.DEPLOYMENT_ENVIRONMENT !== "development"))
+)
+  throw new Error("Expected an approved Worker/origin pair with provisioning explicitly enabled");
 const path = resolve(tokenPath);
 const directory = await stat(dirname(path));
 if (
@@ -37,7 +50,7 @@ let remote;
 let local;
 try {
   remote = await startRemoteProxySession(
-    { ADMIN: { type: "service", service: "or1", entrypoint: "Provisioner", remote: true } },
+    { ADMIN: { type: "service", service: config.name, entrypoint: "Provisioner", remote: true } },
     { auth: { accountId: config.account_id, apiToken: { apiToken: token } } },
   );
   // Local listeners are loopback-only. Wrangler's remote preview bridge is token-protected;
@@ -52,7 +65,7 @@ try {
       compatibilityDate: config.compatibility_date,
       serviceBindings: {
         ADMIN: {
-          name: "or1",
+          name: config.name,
           entrypoint: "Provisioner",
           remoteProxyConnectionString: remote.remoteProxyConnectionString,
         },

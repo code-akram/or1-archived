@@ -84,3 +84,48 @@ The browser resets review state on expiry, identity changes and session refresh.
 and exact uncertain-response retry still work on the loopback-only owner service; they are not
 available on the cloud pilot. Real-data import, cloud acceptance/recovery and online agents require
 separate reviewed milestones, backups and appropriate operational limits.
+
+## Temporary development-only login bypass
+
+This is a **public synthetic development demo**, not a production authentication exception.
+Production `or1.orfloat.com` remains protected by its existing Access application and verified JWTs.
+Do not add an Access bypass policy to production or export an owner's session credential.
+
+The separate `or1-dev` Worker serves only `https://or1-dev.orfloat.com`, with its own SQLite DO
+namespace. Use `wrangler.development.example.jsonc` outside the repository, preserving the exact
+Worker/hostname pair, independent binding (no production `script_name`/service binding), and
+`assets.run_worker_first: true`. Verify its namespace ID differs from production before seeding.
+Only the single `demo-workspace` synthetic project is supported. Never import client data into it.
+Anyone can read/copy this demo and consume its public request quota; isolation does not eliminate
+account-level quota risk.
+
+Enabling requires all of:
+
+- `DEVELOPMENT_REVIEW_BYPASS: "true"` (the example is disabled by default).
+- `DEPLOYMENT_ENVIRONMENT: "development"`.
+- `PUBLIC_ORIGIN: "https://or1-dev.orfloat.com"` and that exact request origin.
+- `DEVELOPMENT_REVIEW_EXPIRES_AT`: a **fixed decimal Unix-millisecond deadline**, strictly in the
+  future and at most seven days ahead. Choose and record its UTC date/time explicitly. Ordinary
+  refreshes, cold starts and redeploys must not reset or extend it.
+- Exactly one configured/default project, `demo-workspace`.
+
+The runtime refuses invalid, missing, expired, production-host or mismatched bypass configuration;
+it never turns JWT failure into anonymous access. Anonymous dev sessions are explicitly marked
+`authentication: "development-bypass"`, use a synthetic viewer principal and remain read-only.
+Supplied owner JWTs or role headers cannot elevate them. Session discovery does not seed data;
+provision the fixed demo privately using the dev configuration and the same helper, then disable
+the provisioner and prove its RPC rejection. The helper validates approved Worker/origin pairs and
+targets the selected Worker—not a hardcoded production service.
+
+The editor prominently identifies public synthetic/non-Access authentication and the full expiry.
+Expiry is checked on every request and after awaited work. Successful dev assets are `no-store`,
+and Worker-first routing prevents APIs/assets from bypassing the deadline. Expiry cannot retract
+previously downloaded public content.
+
+**Removal condition and owner:** Akram must remove the bypass at the next sprint acceptance
+review, or before any real data or hosted write/agent capability, whichever comes first. The fixed
+seven-day limit is an automatic backstop, not permission to retain it through those events.
+Remove the development custom-domain route or deploy a deny-only state; verify anonymous root,
+assets and API requests are denied. Merely clearing the flag is not evidence the whole hostname
+is offline. Preserve DO state rather than deleting it, and revoke temporary deployment credentials
+separately. Re-enabling later requires a deliberate new reviewed deadline/deployment.

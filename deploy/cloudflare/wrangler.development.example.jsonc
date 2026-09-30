@@ -1,0 +1,32 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "or1-dev",
+  "main": "../../apps/cloudflare/src/index.ts",
+  "account_id": "YOUR_CLOUDFLARE_ACCOUNT_ID",
+  "compatibility_date": "2026-09-26",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": { "enabled": false },
+  "routes": [{ "pattern": "or1-dev.orfloat.com", "custom_domain": true }],
+  "assets": {
+    "directory": "../../apps/editor/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "PROJECTS", "class_name": "Project" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Project"] }],
+  "vars": {
+    "PUBLIC_ORIGIN": "https://or1-dev.orfloat.com",
+    "ACCESS_ISSUER": "https://YOUR_TEAM.cloudflareaccess.com",
+    "ACCESS_AUD": "YOUR_ACCESS_APPLICATION_AUDIENCE",
+    "DEPLOYMENT_ENVIRONMENT": "development",
+    "DEVELOPMENT_REVIEW_BYPASS": "false",
+    "DEVELOPMENT_REVIEW_EXPIRES_AT": "SET_FIXED_UNIX_MILLISECONDS_BEFORE_ENABLING",
+    "PROVISIONER_ENABLED": "false",
+    "PROJECT_CONFIG": "{\"defaultProjectId\":\"demo-workspace\",\"projects\":[{\"projectId\":\"demo-workspace\",\"label\":\"Synthetic demo\",\"refs\":[\"option-a\",\"option-b\",\"incomplete\"],\"members\":[]}]}"
+  }
+}

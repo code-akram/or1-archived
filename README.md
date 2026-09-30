@@ -21,6 +21,12 @@ expose cloud acceptance, online agents or real-client projects. See the
 [deployment and private provisioning runbook](deploy/cloudflare/README.md) and
 [editor session contract](apps/editor/README.md).
 
+Initial development can use the separate, temporary **public synthetic read-only** host
+`or1-dev.orfloat.com`. Its explicit bypass configuration has a fixed deadline of at most seven days,
+an independent database namespace, and visible non-Access authentication warnings. It cannot
+enable bypass on production `or1.orfloat.com`. Remove it at the next sprint acceptance review or
+before any real data/hosted writes, whichever comes first; see the runbook for enablement/removal.
+
 ## Layout
 
 | Path | What it is |
