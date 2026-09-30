@@ -1,19 +1,73 @@
 import { DurableObject } from "cloudflare:workers";
 import { createStore } from "@or1/store/portable";
-import { applyChangesTool, createProject } from "@or1/tools";
+import { applyChangesTool, createProject, reviewOption, type ToolContext } from "@or1/tools";
+import type { Env } from "../src/config.ts";
 import { seedDemoV1, syntheticBrief, syntheticModel } from "../src/demo.ts";
+import worker from "../src/index.ts";
 import { sqlDriver } from "../src/sql.ts";
 
 export { default, Project, Provisioner } from "../src/index.ts";
 
 const realNow = Date.now;
+const executeReview = reviewOption.execute;
+let reviewContext:
+  | {
+      namespace: string | undefined;
+      role: ToolContext["role"];
+      reviewProjectId: string | undefined;
+    }
+  | undefined;
+let reviewExpiry: number | undefined;
+// Observe the real registry call and optionally cross the deadline after its successful await.
+// Neither instrumentation nor clock controls are included in the production bundle.
+reviewOption.execute = async (params, ctx) => {
+  reviewContext = {
+    namespace: ctx.namespace,
+    role: ctx.role,
+    reviewProjectId: ctx.reviewProjectId,
+  };
+  const result = await executeReview(params, ctx);
+  if (reviewExpiry !== undefined) {
+    const expiredAt = reviewExpiry;
+    Date.now = () => expiredAt;
+  }
+  return result;
+};
 
 /** Test-only RPC. Not exported or bundled by the production entrypoint. */
-export class Probe extends DurableObject {
+export class Probe extends DurableObject<Env> {
   setClockOffset(milliseconds: number) {
     // Advance the key-cache clock without sleeping; JWT cryptographic verification still runs
     // natively. This lives only in the test bundle, never the deployed entrypoint.
     Date.now = () => realNow() + milliseconds;
+  }
+
+  setClock(milliseconds: number, expireOnRead = Infinity, expiredAt = milliseconds) {
+    let reads = 0;
+    Date.now = () => (++reads >= expireOnRead ? expiredAt : milliseconds);
+  }
+
+  expireAfterReview(expiresAt: number) {
+    reviewExpiry = expiresAt;
+  }
+
+  lastReviewContext() {
+    return reviewContext;
+  }
+
+  async request(
+    target: string,
+    url: string,
+    init: { method?: string; headers?: Record<string, string>; body?: string },
+  ) {
+    // Construct inside workerd: the Node proxy transport strips empty Origin headers and
+    // cannot faithfully represent direct DO POST origins. Exercise the native request instead.
+    const request = new Request(url, init);
+    const response =
+      target === "worker"
+        ? await worker.fetch(request, this.env)
+        : await this.env.PROJECTS.get(this.env.PROJECTS.idFromName(target)).fetch(request);
+    return { status: response.status, body: await response.text() };
   }
 
   async check() {

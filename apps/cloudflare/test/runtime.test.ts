@@ -7,7 +7,7 @@ import type { CloudSession, ReviewOptionResult } from "@or1/tools";
 import { build } from "esbuild";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { convertV4MiniflareOptions, Miniflare } from "miniflare";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 const origin = "https://or1.example.com";
 const issuer = "https://synthetic.cloudflareaccess.com";
@@ -39,8 +39,16 @@ let pair: Awaited<ReturnType<typeof generateKeyPair>>;
 let key: Awaited<ReturnType<typeof exportJWK>>;
 let keyFetches = 0;
 let jwksResponse: (() => Response) | undefined;
+let assetFetches = 0;
+let assetResponse: (() => Response | Promise<Response>) | undefined;
+let requestOrigin = origin;
 
-async function start(enabled = "true", projectConfig = config) {
+async function start(
+  enabled = "true",
+  projectConfig = config,
+  bindings: Record<string, string> = {},
+  persistencePath = persist,
+) {
   return new Miniflare({
     ...convertV4MiniflareOptions({
       unsafeInspectDurableObjects: true,
@@ -57,12 +65,18 @@ async function start(enabled = "true", projectConfig = config) {
             ACCESS_AUD: "synthetic-audience",
             PROJECT_CONFIG: JSON.stringify(projectConfig),
             PROVISIONER_ENABLED: enabled,
+            ...bindings,
           },
           durableObjects: {
             PROJECTS: { className: "Project", useSQLite: true },
             PROBE: { className: "Probe", useSQLite: true },
           },
-          serviceBindings: { ASSETS: () => new Response("synthetic asset") },
+          serviceBindings: {
+            ASSETS: () => {
+              assetFetches++;
+              return assetResponse?.() ?? new Response("synthetic asset");
+            },
+          },
           outboundService: (request) => {
             if (request.url !== `${issuer}/cdn-cgi/access/certs`)
               throw new Error("Unexpected outbound request");
@@ -81,7 +95,7 @@ async function start(enabled = "true", projectConfig = config) {
         },
       ],
     }),
-    resourcePersistencePath: persist,
+    resourcePersistencePath: persistencePath,
   });
 }
 
@@ -113,7 +127,7 @@ async function token(
 }
 
 async function session(jwt?: string, headers: Record<string, string> = {}) {
-  return mf.dispatchFetch(`${origin}/api/session`, {
+  return mf.dispatchFetch(`${requestOrigin}/api/session`, {
     headers: {
       ...(jwt ? { "Cf-Access-Jwt-Assertion": jwt } : {}),
       ...headers,
@@ -127,10 +141,10 @@ async function review(
   input = projectId,
   headers: Record<string, string> = {},
 ) {
-  return mf.dispatchFetch(`${origin}/api/tools/review_option`, {
+  return mf.dispatchFetch(`${requestOrigin}/api/tools/review_option`, {
     method: "POST",
     headers: {
-      Origin: origin,
+      Origin: requestOrigin,
       "Content-Type": "application/json",
       "Cf-Access-Jwt-Assertion": jwt,
       ...headers,
@@ -201,6 +215,7 @@ describe("native Worker and SQLite Project DO", () => {
         .digest("hex")}`,
     );
     expect(value.expiresAt).toBeGreaterThan(Date.now());
+    expect(value).not.toHaveProperty("authentication");
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     expect(response.headers.has("Access-Control-Allow-Origin")).toBe(false);
     expect(await tables()).toEqual([]);
@@ -437,6 +452,400 @@ describe("native Worker and SQLite Project DO", () => {
     } finally {
       await clock.setClockOffset(0);
       jwksResponse = undefined;
+    }
+  });
+});
+
+describe("isolated development review bypass in native workerd", () => {
+  const developmentOrigin = "https://or1-dev.orfloat.com";
+  const developmentConfig = { ...config, projects: config.projects.slice(0, 1) };
+  const principalId = "development-bypass:demo-workspace:v1";
+  const now = 1_800_000_000_000;
+  const expiresAt = now + 60_000;
+  const bindings = {
+    PUBLIC_ORIGIN: developmentOrigin,
+    DEVELOPMENT_REVIEW_BYPASS: "true",
+    DEPLOYMENT_ENVIRONMENT: "development",
+    DEVELOPMENT_REVIEW_EXPIRES_AT: String(expiresAt),
+  };
+  let caseNumber = 0;
+  let persistencePath: string;
+
+  async function restart(
+    overrides: Record<string, string | undefined> = {},
+    projectConfig = developmentConfig,
+  ) {
+    await mf.dispose();
+    const env: Record<string, string> = { ...bindings };
+    for (const [name, value] of Object.entries(overrides)) {
+      if (value === undefined) delete env[name];
+      else env[name] = value;
+    }
+    mf = await start("true", projectConfig, env, persistencePath);
+    const clock = await probe();
+    await clock.setClock(now);
+  }
+
+  async function probe() {
+    const ns = await mf.getDurableObjectNamespace("PROBE", "runtime");
+    return ns.get(ns.idFromName("development-clock")) as unknown as {
+      setClock(ms: number, expireOnRead?: number, expiredAt?: number): Promise<void>;
+      expireAfterReview(ms: number): Promise<void>;
+      lastReviewContext(): Promise<unknown>;
+      request(
+        target: string,
+        url: string,
+        init: { method?: string; headers?: Record<string, string>; body?: string },
+      ): Promise<{ status: number; body: string }>;
+    };
+  }
+
+  async function direct() {
+    const ns = await mf.getDurableObjectNamespace("PROJECTS", "runtime");
+    return ns.get(ns.idFromName(projectId));
+  }
+
+  beforeEach(async () => {
+    requestOrigin = developmentOrigin;
+    persistencePath = join(persist, `development-${++caseNumber}`);
+    assetResponse = undefined;
+    await restart();
+  });
+
+  it("returns the anonymous viewer marker and fixed deadline without initializing SQL or fetching JWKS", async () => {
+    const before = keyFetches;
+    for (const jwt of [undefined, "malformed", await token({ email: "owner@example.com" })]) {
+      const response = await session(jwt, { "X-Or1-Role": "owner", "X-Or1-Principal-Id": "owner" });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        mode: "cloud",
+        authentication: "development-bypass",
+        principalId,
+        expiresAt,
+        projects: [
+          {
+            projectId,
+            label: "Synthetic demo",
+            membership: "viewer",
+            refs: ["option-a", "option-b", "incomplete"],
+            permissions: { canReview: true, canAccept: false },
+          },
+        ],
+      });
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+    }
+    expect(keyFetches).toBe(before);
+    expect(await tables()).toEqual([]);
+    // A development viewer is not a fabricated member/owner email.
+    await restart(
+      {},
+      {
+        ...developmentConfig,
+        projects: developmentConfig.projects.map((project) => ({ ...project, members: [] })),
+      },
+    );
+    expect((await session()).status).toBe(200);
+    expect(await tables()).toEqual([]);
+    await seed();
+    expect(await (await review("")).json()).toMatchObject({ ok: true, projectId, ref: "option-a" });
+    expect(await (await probe()).lastReviewContext()).toEqual({
+      namespace: principalId,
+      role: "external",
+      reviewProjectId: projectId,
+    });
+  });
+
+  it("reviews anonymously with external capability, ignores owner credentials, and leaves snapshots unchanged", async () => {
+    await seed();
+    const before = await snapshot();
+    const fetches = keyFetches;
+    for (const jwt of ["", "malformed", await token({ email: "owner@example.com" })]) {
+      for (const ref of ["option-a", "option-b", "incomplete"]) {
+        const response = await review(jwt, ref, projectId, {
+          "X-Or1-Role": "owner",
+          "X-Or1-Principal-Id": "owner",
+          "X-Or1-Project-Id": "other-project",
+        });
+        expect(response.status).toBe(200);
+        expect(response.headers.get("X-Or1-Principal-Id")).toBe(principalId);
+        const value = (await response.json()) as ReviewOptionResult;
+        expect(value).toMatchObject({ ok: true, projectId, ref });
+        if (!value.ok) throw new Error("Development review rejected");
+        expect(value.option.model.openings[0]?.offset).toBe(
+          ref === "option-a" ? 800 : ref === "option-b" ? 2100 : 1200,
+        );
+        expect(value.eligibility.allowed).toBe(ref !== "incomplete");
+        expect(await (await probe()).lastReviewContext()).toEqual({
+          namespace: principalId,
+          role: "external",
+          reviewProjectId: projectId,
+        });
+      }
+    }
+    expect(keyFetches).toBe(fetches);
+    expect((await review("", "option-a", "other-project")).status).toBe(404);
+    for (const path of [
+      "/api/seed",
+      "/api/tools/accept_option",
+      "/api/runs",
+      "/seed",
+      "/accept",
+      "/run",
+      "/tools/apply_changes",
+    ]) {
+      expect((await mf.dispatchFetch(`${developmentOrigin}${path}`)).status).toBe(404);
+    }
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it("fails closed for malformed flags, environments, origins, project configs and deadlines even with an owner JWT", async () => {
+    const jwt = await token({ email: "owner@example.com", exp: Math.floor(now / 1000) + 600 });
+    const fetches = keyFetches;
+    const assets = assetFetches;
+    for (const overrides of [
+      { DEVELOPMENT_REVIEW_BYPASS: "TRUE" },
+      { DEVELOPMENT_REVIEW_BYPASS: "" },
+      { DEVELOPMENT_REVIEW_BYPASS: "1" },
+      { DEPLOYMENT_ENVIRONMENT: "production" },
+      { DEPLOYMENT_ENVIRONMENT: "" },
+      { DEPLOYMENT_ENVIRONMENT: undefined },
+      { PUBLIC_ORIGIN: "https://or1.orfloat.com" },
+      { PUBLIC_ORIGIN: `${developmentOrigin}/` },
+      { PUBLIC_ORIGIN: "http://or1-dev.orfloat.com" },
+      { DEVELOPMENT_REVIEW_EXPIRES_AT: "" },
+      { DEVELOPMENT_REVIEW_EXPIRES_AT: undefined },
+      { DEVELOPMENT_REVIEW_EXPIRES_AT: "1800000060000.0" },
+      { DEVELOPMENT_REVIEW_EXPIRES_AT: "1.8e12" },
+      { DEVELOPMENT_REVIEW_EXPIRES_AT: " 1800000060000" },
+      { DEVELOPMENT_REVIEW_EXPIRES_AT: "-1" },
+      { DEVELOPMENT_REVIEW_EXPIRES_AT: "9007199254740992" },
+      { PROJECT_CONFIG: "{" },
+      { PROJECT_CONFIG: JSON.stringify(config) },
+      {
+        PROJECT_CONFIG: JSON.stringify({ ...developmentConfig, defaultProjectId: "other-project" }),
+      },
+      {
+        PROJECT_CONFIG: JSON.stringify({
+          defaultProjectId: "other-project",
+          projects: [config.projects[1]],
+        }),
+      },
+    ]) {
+      await restart(overrides);
+      for (const response of [
+        await session(jwt),
+        await mf.dispatchFetch(`${developmentOrigin}/app`),
+      ]) {
+        expect(response.status).toBe(503);
+        expect(response.headers.get("Cache-Control")).toBe("no-store");
+      }
+      expect(
+        (
+          await (
+            await direct()
+          ).fetch(`${developmentOrigin}/api/session`, {
+            headers: { "X-Or1-Project-Id": projectId, "Cf-Access-Jwt-Assertion": jwt },
+          })
+        ).status,
+      ).not.toBe(200);
+      expect(await tables()).toEqual([]);
+    }
+    expect(keyFetches).toBe(fetches);
+    expect(assetFetches).toBe(assets);
+  }, 30_000);
+
+  it("enforces both deadline endpoints and rechecks warm Worker and DO instances at exact expiry", async () => {
+    for (const delta of [-1, 0, 1, 7 * 24 * 60 * 60_000, 7 * 24 * 60 * 60_000 + 1]) {
+      await restart({ DEVELOPMENT_REVIEW_EXPIRES_AT: String(now + delta) });
+      const expected = delta > 0 && delta <= 604_800_000 ? 200 : 401;
+      expect((await session()).status).toBe(expected);
+      expect(
+        (
+          await (
+            await probe()
+          ).request(projectId, `${developmentOrigin}/api/session`, {
+            headers: { "X-Or1-Project-Id": projectId },
+          })
+        ).status,
+      ).toBe(expected);
+    }
+    await restart();
+    const clock = await probe();
+    await clock.setClock(expiresAt - 1);
+    expect((await session()).status).toBe(200);
+    const stub = await direct();
+    expect(
+      (
+        await stub.fetch(`${developmentOrigin}/api/session`, {
+          headers: { "X-Or1-Project-Id": projectId },
+        })
+      ).status,
+    ).toBe(200);
+    const assets = assetFetches;
+    await clock.setClock(expiresAt);
+    expect((await session(await token({ email: "owner@example.com" }))).status).toBe(401);
+    expect(
+      (
+        await stub.fetch(`${developmentOrigin}/api/session`, {
+          headers: { "X-Or1-Project-Id": projectId },
+        })
+      ).status,
+    ).toBe(401);
+    expect((await mf.dispatchFetch(`${developmentOrigin}/app`)).status).toBe(401);
+    expect(assetFetches).toBe(assets);
+    expect(await tables()).toEqual([]);
+  });
+
+  it("keeps exact request origin checks and rejects direct DO project/identity spoofing", async () => {
+    for (const wrongOrigin of [
+      origin,
+      "http://or1-dev.orfloat.com",
+      "https://or1-dev.orfloat.com:444",
+      "https://or1-dev.orfloat.com.evil.example",
+    ]) {
+      expect((await mf.dispatchFetch(`${wrongOrigin}/api/session`)).status).toBe(403);
+      expect((await mf.dispatchFetch(`${wrongOrigin}/app`)).status).toBe(403);
+    }
+    for (const wrongOrigin of [origin, "null"]) {
+      expect((await session(undefined, { Origin: wrongOrigin })).status).toBe(403);
+      expect((await review("", "option-a", projectId, { Origin: wrongOrigin })).status).toBe(403);
+      expect(
+        (await mf.dispatchFetch(`${developmentOrigin}/app`, { headers: { Origin: wrongOrigin } }))
+          .status,
+      ).toBe(403);
+    }
+    const native = await probe();
+    for (const path of ["/api/session", "/app"]) {
+      expect(
+        (
+          await native.request("worker", `${developmentOrigin}${path}`, {
+            headers: { Origin: "" },
+          })
+        ).status,
+      ).toBe(403);
+    }
+    const ns = await mf.getDurableObjectNamespace("PROJECTS", "runtime");
+    const headers = { "X-Or1-Project-Id": projectId, "X-Or1-Role": "owner" };
+    expect(
+      (
+        await ns
+          .get(ns.idFromName("other-project"))
+          .fetch(`${developmentOrigin}/api/session`, { headers })
+      ).status,
+    ).toBe(404);
+    const stub = await direct();
+    expect(
+      (
+        await stub.fetch(`${developmentOrigin}/api/session`, {
+          headers: { ...headers, "X-Or1-Project-Id": "other-project" },
+        })
+      ).status,
+    ).toBe(404);
+    expect((await stub.fetch(`${origin}/api/session`, { headers })).status).toBe(403);
+    expect(
+      (
+        await native.request(projectId, `${developmentOrigin}/api/tools/review_option`, {
+          method: "POST",
+          headers: { ...headers, Origin: developmentOrigin, "Content-Type": "application/json" },
+          body: JSON.stringify({ projectId: "other-project", ref: "option-a" }),
+        })
+      ).status,
+    ).toBe(404);
+    const rpc = stub as unknown as {
+      openStore(): Promise<unknown>;
+      boundProject(id: string): Promise<unknown>;
+    };
+    await expect(async () => rpc.openStore()).rejects.toThrow('method "openStore"');
+    await expect(async () => rpc.boundProject(projectId)).rejects.toThrow('method "boundProject"');
+    expect(await tables()).toEqual([]);
+  });
+
+  it("rechecks after awaited session and review work in both DO and Worker", async () => {
+    const clock = await probe();
+    const stub = await direct();
+    // Direct session: entry is read 1, post-body/session is read 2.
+    await clock.setClock(now, 2, expiresAt);
+    expect(
+      (
+        await stub.fetch(`${developmentOrigin}/api/session`, {
+          headers: { "X-Or1-Project-Id": projectId },
+        })
+      ).status,
+    ).toBe(401);
+    // Worker session: Worker entry, DO entry, DO success, then Worker post-await.
+    await clock.setClock(now, 4, expiresAt);
+    expect((await session()).status).toBe(401);
+    await clock.setClock(now);
+    await seed();
+    const before = await snapshot();
+    // Worker review: its post-await deadline follows both DO deadline reads and token expiry.
+    await clock.setClock(now, 5, expiresAt);
+    expect((await review("")).status).toBe(401);
+    await clock.setClock(now);
+    // Review succeeds in the real registry, then the test-only observer crosses expiry.
+    await clock.expireAfterReview(expiresAt);
+    expect(
+      (
+        await clock.request(projectId, `${developmentOrigin}/api/tools/review_option`, {
+          method: "POST",
+          headers: {
+            "X-Or1-Project-Id": projectId,
+            Origin: developmentOrigin,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ projectId, ref: "option-a" }),
+        })
+      ).status,
+    ).toBe(401);
+    expect(await clock.lastReviewContext()).toEqual({
+      namespace: principalId,
+      role: "external",
+      reviewProjectId: projectId,
+    });
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it("makes successful assets no-store and rejects expiry during asset work without SPA fallback", async () => {
+    const clock = await probe();
+    assetResponse = () =>
+      new Response("synthetic asset", { headers: { "Cache-Control": "public, max-age=3600" } });
+    for (const method of ["GET", "HEAD"]) {
+      const response = await mf.dispatchFetch(`${developmentOrigin}/app`, { method });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+    }
+    const assets = assetFetches;
+    assetResponse = async () => {
+      await clock.setClock(expiresAt);
+      return new Response("must not escape after expiry");
+    };
+    const response = await mf.dispatchFetch(`${developmentOrigin}/app`);
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ ok: false, code: "unauthorized" });
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(assetFetches).toBe(assets + 1);
+    expect((await mf.dispatchFetch(`${developmentOrigin}/app`)).status).toBe(401);
+    expect(assetFetches).toBe(assets + 1);
+  });
+
+  it("keeps false/absent mode JWT-only and ignores project JSON or header mode injection", async () => {
+    for (const flag of [undefined, "false"]) {
+      await restart({ DEVELOPMENT_REVIEW_BYPASS: flag, DEVELOPMENT_REVIEW_EXPIRES_AT: "invalid" }, {
+        ...developmentConfig,
+        developmentReviewExpiresAt: expiresAt,
+      } as typeof developmentConfig);
+      await (await probe()).setClock(Date.now());
+      const fetches = keyFetches;
+      expect(
+        (await session(undefined, { "X-Or1-Authentication": "development-bypass" })).status,
+      ).toBe(401);
+      const response = await session(await token({ email: "owner@example.com" }));
+      expect(response.status).toBe(200);
+      const value = (await response.json()) as CloudSession;
+      expect(value).not.toHaveProperty("authentication");
+      expect(value.principalId).toMatch(/^access-v1:/);
+      expect(value.projects[0]?.membership).toBe("owner");
+      expect(keyFetches).toBe(fetches + 1);
     }
   });
 });
