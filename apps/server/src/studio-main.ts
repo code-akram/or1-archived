@@ -20,21 +20,23 @@ Agents use your personal ChatGPT subscription after an explicit interactive logi
 The owner token is OR1_OWNER_TOKEN, or a fresh random one per start. It is printed once, inside a
 URL fragment that the browser never sends to the server. Runs have no wall-clock deadline.`;
 
-const { values } = parseArgs({
-  args: process.argv.slice(2),
-  options: {
-    model: { type: "string" },
-    offline: { type: "boolean" },
-    port: { type: "string" },
-    help: { type: "boolean" },
-  },
-  strict: true,
-  allowPositionals: false,
-});
-
 let store: Store | undefined;
 let studio: Studio | undefined;
 try {
+  // `pnpm studio -- --model x` forwards the literal `--`; accept it as well as `pnpm studio --model x`.
+  const args = process.argv.slice(2);
+  if (args[0] === "--") args.shift();
+  const { values } = parseArgs({
+    args,
+    options: {
+      model: { type: "string" },
+      offline: { type: "boolean" },
+      port: { type: "string" },
+      help: { type: "boolean" },
+    },
+    strict: true,
+    allowPositionals: false,
+  });
   if (values.help) {
     console.log(HELP);
     process.exit(0);
