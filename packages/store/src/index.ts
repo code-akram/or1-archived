@@ -73,11 +73,20 @@ export type Store = {
   /** For inspection and legacy compatibility only. Application writes use execute/run helpers. */
   readonly db: DatabaseSync;
   execute(
+    command: AcceptanceCommand,
+    caller: Caller,
+    evaluate?: AcceptanceEvaluator,
+  ): AcceptanceResult;
+  execute(
     command: Command,
     caller: Caller,
     evaluate?: Evaluator,
     validateMetadata?: MetadataValidator,
   ): CommandResult;
+  readReview(
+    projectId: string,
+    sourceRef: string,
+  ): { ok: true; states: AcceptanceStates } | Rejection;
   readState(projectId: string, ref: string): RefState | null;
   readSnapshot(projectId: string, revisionId: string): unknown;
   readBriefs(projectId: string): RefState["brief"][];
@@ -106,16 +115,49 @@ type Envelope = { projectId: string; ref: string; baseRevision: string | null; r
  * For fork_ref, ref is the new target name and baseRevision is the sourceRef's expected head.
  * apply_changes body is the canonical core command, including any caller-supplied context pins.
  */
-export type Command = Envelope &
-  (
-    | { type: "create_project"; body: { model: unknown; brief: unknown } }
-    | { type: "fork_ref"; body: { sourceRef: string } }
-    | { type: "set_brief"; body: { brief: unknown; baseBriefVersion: number } }
-    | { type: "apply_changes"; body: unknown }
-  );
+export type Command =
+  | (Envelope &
+      (
+        | { type: "create_project"; body: { model: unknown; brief: unknown } }
+        | { type: "fork_ref"; body: { sourceRef: string } }
+        | { type: "set_brief"; body: { brief: unknown; baseBriefVersion: number } }
+        | { type: "apply_changes"; body: unknown }
+      ))
+  | AcceptanceCommand;
+export type AcceptanceCommand = {
+  type: "accept_option";
+  projectId: string;
+  ref: "main";
+  baseRevision: string;
+  requestId: string;
+  body: {
+    sourceRef: string;
+    sourceRevisionId: string;
+    briefVersion: number;
+    baselineRevisionId: string;
+    evaluatorVersion: string;
+  };
+};
 export type Rejection = { ok: false; code: string; message?: string; details?: unknown };
 export type CommandResult =
-  | { ok: true; revisionId: string; briefVersion: number; effects: unknown }
+  | {
+      ok: true;
+      revisionId: string;
+      briefVersion: number;
+      effects: unknown;
+      acceptance?: AcceptanceReceipt;
+    }
+  | Rejection;
+export type AcceptanceReceipt = AcceptanceCommand["body"] & {
+  schemaVersion: 1;
+  projectId: string;
+  previousMainRevisionId: string;
+  requestId: string;
+  actor: { role: "owner"; namespace: string };
+  scorecard: unknown;
+};
+export type AcceptanceResult =
+  | (Extract<CommandResult, { ok: true }> & { acceptance: AcceptanceReceipt; effects: [] })
   | Rejection;
 export type RefState = {
   projectId: string;
@@ -128,6 +170,11 @@ export type RefState = {
 export type Evaluation = { ok: true; model: unknown; effects: unknown } | Rejection;
 /** Must be synchronous and side-effect free; an exception rolls back without caching an outcome. */
 export type Evaluator = (state: RefState) => Evaluation;
+export type AcceptanceStates = { main: RefState; source: RefState };
+/** Core semantics belong to the registry. The store promotes the unchanged source snapshot only. */
+export type AcceptanceEvaluator = (
+  states: AcceptanceStates,
+) => { ok: true; evaluation: { evaluatorVersion: string; result: unknown } } | Rejection;
 /** Runs inside the write transaction after preconditions and before metadata writes, never on replay.
  * State is null for creation, the source ref for fork_ref, and the target ref for set_brief.
  * May read store.readBriefs for lineage checks; must be synchronous and otherwise side-effect free.
@@ -175,9 +222,11 @@ export type RunTurn = {
 export const MAX_RUN_TURN_BYTES = 65_536;
 /** Maximum UTF-8 bytes of the complete canonical final evaluation JSON. */
 export const MAX_RUN_EVALUATION_BYTES = 65_536;
+/** Maximum UTF-8 bytes of the complete canonical acceptance receipt JSON. */
+export const MAX_ACCEPTANCE_RECEIPT_BYTES = 65_536;
 
-function transaction<T>(db: DatabaseSync, action: () => T): T {
-  db.exec("BEGIN IMMEDIATE");
+function transaction<T>(db: DatabaseSync, action: () => T, begin = "BEGIN IMMEDIATE"): T {
+  db.exec(begin);
   try {
     const result = action();
     db.exec("COMMIT");
@@ -376,10 +425,33 @@ export function openStore(path: string): Store {
     };
   }
 
+  function reviewStates(
+    projectId: string,
+    sourceRef: string,
+  ): { ok: true; states: AcceptanceStates } | Rejection {
+    if (sourceRef === "main") return { ok: false, code: "invalid_ref" };
+    const main = readState(projectId, "main");
+    const source = readState(projectId, sourceRef);
+    if (!main || !source) return { ok: false, code: "ref_not_found" };
+    if (!source.forkBase) return { ok: false, code: "invalid_ref" };
+    return { ok: true, states: { main, source } };
+  }
+
+  function execute(
+    command: AcceptanceCommand,
+    caller: Caller,
+    evaluate?: AcceptanceEvaluator,
+  ): AcceptanceResult;
   function execute(
     command: Command,
     caller: Caller,
     evaluate?: Evaluator,
+    validateMetadata?: MetadataValidator,
+  ): CommandResult;
+  function execute(
+    command: Command,
+    caller: Caller,
+    evaluate?: Evaluator | AcceptanceEvaluator,
     validateMetadata?: MetadataValidator,
   ): CommandResult {
     if (
@@ -390,7 +462,9 @@ export function openStore(path: string): Store {
       return { ok: false, code: "invalid_caller" };
     }
     if (
-      !["create_project", "fork_ref", "set_brief", "apply_changes"].includes(command.type) ||
+      !["create_project", "fork_ref", "set_brief", "apply_changes", "accept_option"].includes(
+        command.type,
+      ) ||
       !bounded(command.projectId) ||
       !bounded(command.ref) ||
       !bounded(command.requestId) ||
@@ -398,13 +472,21 @@ export function openStore(path: string): Store {
       (command.type === "set_brief" &&
         (!Number.isSafeInteger(command.body.baseBriefVersion) ||
           command.body.baseBriefVersion < 0)) ||
+      (command.type === "accept_option" &&
+        (!bounded(command.baseRevision) ||
+          !bounded(command.body.sourceRef) ||
+          !bounded(command.body.sourceRevisionId) ||
+          !bounded(command.body.baselineRevisionId) ||
+          !bounded(command.body.evaluatorVersion) ||
+          !Number.isSafeInteger(command.body.briefVersion) ||
+          command.body.briefVersion < 0)) ||
       (command.baseRevision !== null && !bounded(command.baseRevision))
     ) {
       return { ok: false, code: "invalid_command" };
     }
     // Caller context must come from the authenticated registry, never command arguments.
     // Authorization precedes cached replay, including a cached owner success.
-    if (command.type !== "apply_changes" && caller.role !== "owner")
+    if ((command.type !== "apply_changes" || command.ref === "main") && caller.role !== "owner")
       return { ok: false, code: "forbidden" };
     const commandJson = json(command);
     return transaction(db, () => {
@@ -504,6 +586,83 @@ export function openStore(path: string): Store {
         return persist({ ok: true, revisionId, briefVersion: 1, effects: [] });
       }
       if (!projectExists) return persist({ ok: false, code: "project_not_found" });
+      if (command.type === "accept_option") {
+        if (command.ref !== "main") return persist({ ok: false, code: "invalid_ref" });
+        const review = reviewStates(command.projectId, command.body.sourceRef);
+        if (!review.ok) return persist(review);
+        const { main, source } = review.states;
+        if (command.baseRevision !== main.revisionId)
+          return persist({ ok: false, code: "stale_base" });
+        if (command.body.sourceRevisionId !== source.revisionId)
+          return persist({ ok: false, code: "stale_source" });
+        if (command.body.briefVersion !== main.brief.version)
+          return persist({ ok: false, code: "stale_brief" });
+        if (
+          command.body.baselineRevisionId !== source.forkBase?.revisionId ||
+          command.body.baselineRevisionId !== command.baseRevision ||
+          command.body.baselineRevisionId !== main.revisionId
+        )
+          return persist({ ok: false, code: "stale_baseline" });
+        if (!evaluate) throw new Error("accept_option requires a synchronous evaluator");
+        const candidate = (evaluate as AcceptanceEvaluator)(review.states);
+        if (
+          !candidate ||
+          Object.getPrototypeOf(candidate) !== Object.prototype ||
+          (candidate.ok !== true && candidate.ok !== false) ||
+          (candidate.ok === false &&
+            (!bounded(candidate.code) ||
+              (candidate.message !== undefined && typeof candidate.message !== "string"))) ||
+          (candidate.ok === true &&
+            (!candidate.evaluation ||
+              Object.getPrototypeOf(candidate.evaluation) !== Object.prototype ||
+              !bounded(candidate.evaluation.evaluatorVersion) ||
+              !Object.hasOwn(candidate.evaluation, "result")))
+        )
+          throw new Error("Acceptance evaluator must return a synchronous evaluation or rejection");
+        // Canonicalize even mismatched evaluations so malformed/async data throws uncached.
+        json(candidate);
+        if (!candidate.ok) return persist(candidate);
+        if (candidate.evaluation.evaluatorVersion !== command.body.evaluatorVersion)
+          return persist({ ok: false, code: "stale_evaluator" });
+        const receipt: AcceptanceReceipt = {
+          ...command.body,
+          schemaVersion: 1,
+          projectId: command.projectId,
+          previousMainRevisionId: main.revisionId,
+          requestId: command.requestId,
+          actor: { role: "owner", namespace: caller.namespace },
+          scorecard: candidate.evaluation.result,
+        };
+        const receiptJson = json(receipt);
+        if (Buffer.byteLength(receiptJson) > MAX_ACCEPTANCE_RECEIPT_BYTES)
+          return persist({ ok: false, code: "score_too_large" });
+        const revisionId = randomUUID();
+        // Copy the persisted bytes, not the evaluator's (potentially mutated) state/model.
+        db.prepare(
+          "INSERT INTO revisions (id, project_id, parent_id, change_set, snapshot, created_at) SELECT ?, project_id, ?, ?, snapshot, ? FROM revisions WHERE project_id = ? AND id = ?",
+        ).run(
+          revisionId,
+          main.revisionId,
+          json({
+            type: "accept_option",
+            command: JSON.parse(commandJson),
+            acceptance: JSON.parse(receiptJson),
+          }),
+          new Date().toISOString(),
+          command.projectId,
+          source.revisionId,
+        );
+        db.prepare(
+          "UPDATE refs SET head_revision_id = ? WHERE project_id = ? AND name = 'main'",
+        ).run(revisionId, command.projectId);
+        return persist({
+          ok: true,
+          revisionId,
+          briefVersion: main.brief.version,
+          effects: [],
+          acceptance: receipt,
+        });
+      }
       if (!state) return persist({ ok: false, code: "ref_not_found" });
       if (command.baseRevision !== state.revisionId)
         return persist({ ok: false, code: "stale_base" });
@@ -545,7 +704,7 @@ export function openStore(path: string): Store {
         });
       }
       if (!evaluate) throw new Error("apply_changes requires a synchronous evaluator");
-      const candidate = evaluate(state);
+      const candidate = (evaluate as Evaluator)(state);
       if (!candidate || typeof candidate.ok !== "boolean")
         throw new Error("Evaluator must return a synchronous evaluation");
       if (!candidate.ok) return persist(candidate);
@@ -622,6 +781,18 @@ export function openStore(path: string): Store {
   return {
     db,
     execute,
+    readReview: (projectId, sourceRef) => {
+      if (!bounded(projectId) || !bounded(sourceRef)) return { ok: false, code: "invalid_command" };
+      return transaction(
+        db,
+        () => {
+          if (!db.prepare("SELECT 1 FROM projects WHERE id = ?").get(projectId))
+            return { ok: false, code: "project_not_found" };
+          return reviewStates(projectId, sourceRef);
+        },
+        "BEGIN",
+      );
+    },
     readState,
     readSnapshot,
     readRun,

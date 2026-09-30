@@ -23,7 +23,8 @@ the credential namespace has the same rules but permits 256 code units.
 | `create_project` | `{ model: unknown, brief: unknown }` | Owner only; project must not exist; `baseRevision: null`. Creates project, root revision, named ref and brief content version 1 atomically. |
 | `fork_ref` | `{ sourceRef: string }` | Owner only; `ref` is the new target name, `baseRevision` must equal the source ref head. Pins the fork baseline to that revision. |
 | `set_brief` | `{ brief: unknown, baseBriefVersion: number }` | Owner only; `baseRevision` must equal the target ref head and `baseBriefVersion` must equal the current project-wide brief content version. Appends a brief version without creating a geometry revision. The version is a nonnegative safe integer (0 for legacy projects without briefs). |
-| `apply_changes` | `unknown` | `baseRevision` must equal the target ref head. Registry supplies the canonical core command, including caller-supplied context pins, and a synchronous evaluator. |
+| `apply_changes` | `unknown` | Owner only on `main`; other refs permit agent/external edits. `baseRevision` must equal the target ref head. Registry supplies the canonical core command, including caller-supplied context pins, and a synchronous evaluator. |
+| `accept_option` | `{ sourceRef, sourceRevisionId, briefVersion, baselineRevisionId, evaluatorVersion }` | Owner only, no run binding; target `ref: "main"` and non-null `baseRevision`. Promotes an unchanged non-main fork snapshot after exact head, brief and baseline checks and registry evaluation. |
 
 Results are `{ ok: true, revisionId, briefVersion, effects }` or
 `{ ok: false, code, message?, details? }`. `briefVersion` is the store's append-only
@@ -66,6 +67,36 @@ the mutable run cursor and status are not. Historical identical commands may
 replay after completion, interruption, or head/context advancement without changing
 the run cursor. An absent binding retains the exact v2 fingerprint format.
 
+### Snapshot acceptance
+
+`execute` has a command-specific overload for `AcceptanceCommand`, with a synchronous
+`AcceptanceEvaluator` receiving `AcceptanceStates = { main: RefState, source: RefState }`.
+Return `{ ok: true, evaluation: { evaluatorVersion: string, result: unknown } }` or
+a rejection. The registry owns scorecard schemas and core semantics; no evaluator
+model or effects are accepted. Malformed/asynchronous results and exceptions throw
+and roll back uncached. Deterministic rejections are cached.
+
+New acceptance checks the current main head (`stale_base`), source head
+(`stale_source`), latest brief (`stale_brief`) and that the supplied baseline equals
+both the immutable source fork baseline and expected/current main (`stale_baseline`).
+Evaluator version must match the submitted version (`stale_evaluator`). Main/nonfork
+sources or a non-main target reject `invalid_ref`. Missing refs reject `ref_not_found`;
+foreign/missing source revision pins reject `stale_source`.
+
+Success adds `acceptance: AcceptanceReceipt` to the ordinary result, with `effects: []`.
+The receipt contains all submitted body pins plus `schemaVersion: 1`, `projectId`,
+`previousMainRevisionId`, `requestId`, `actor: { role: "owner", namespace }` and opaque
+`scorecard`. The entire canonical receipt is capped at `MAX_ACCEPTANCE_RECEIPT_BYTES`
+(65,536 UTF-8 bytes; `score_too_large`). The revision parents the old main head,
+copies the source snapshot bytes exactly, and stores
+`{ type: "accept_option", command, acceptance }` as its change set. Only main advances;
+source/history/briefs/run cursors and evaluations are unchanged. Existing run stale
+guards reject subsequent work on options with the former main baseline.
+
+Authorization and run-binding checks precede replay. Exact retries replay even after
+all pins or the evaluator change; altered submitted commands conflict. Acceptance
+requires no migration and does not alter existing fingerprint formats.
+
 New run-bound work requires a running run (`run_not_running` otherwise), and
 `baseRevision == run.revisionId == ref head`, with unchanged brief content version,
 fork baseline and current main baseline (`stale_run` otherwise). Candidate revision,
@@ -76,6 +107,9 @@ the cursor; the registry must not permit callers to forge a workflow binding.
 
 ## Reads and runs
 
+- `readReview(projectId, sourceRef)` returns `{ ok: true, states: AcceptanceStates }`
+  or a rejection, reading main/source/brief in a short coherent deferred transaction
+  without reserving a write lock. It rejects main/nonfork sources with `invalid_ref`.
 - `readState(projectId, ref)` returns `RefState | null`.
 - `readSnapshot(projectId, revisionId)` returns JSON or throws if the revision does
   not belong to that project. Historical null snapshots remain null.

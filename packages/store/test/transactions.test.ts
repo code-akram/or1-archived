@@ -100,9 +100,9 @@ describe("transactional commands", () => {
     const store = storeAt();
     const first = change(create(store));
     const evaluator = vi.fn(evaluate);
-    const original = accepted(store.execute(first, agent, evaluator));
+    const original = accepted(store.execute(first, owner, evaluator));
     const later = accepted(
-      store.execute(change(original.revisionId, "later"), agent, () => ({
+      store.execute(change(original.revisionId, "later"), owner, () => ({
         ok: true,
         model: { counter: 13 },
         effects: [{ after: 13 }],
@@ -123,7 +123,7 @@ describe("transactional commands", () => {
     );
     const before = counts(store);
     expect(
-      store.execute({ ...first, body: { nested: { a: 1, b: 2 }, amount: 3 } }, agent, evaluator),
+      store.execute({ ...first, body: { nested: { a: 1, b: 2 }, amount: 3 } }, owner, evaluator),
     ).toEqual(original);
     expect(evaluator).toHaveBeenCalledTimes(1);
     expect(counts(store)).toEqual(before);
@@ -173,7 +173,7 @@ describe("transactional commands", () => {
     });
     expect(store.execute(first, { ...agent, role: "external" }, evaluate)).toEqual({
       ok: false,
-      code: "request_conflict",
+      code: "forbidden",
     });
     expect(store.readState("p", "main")?.revisionId).toBe(result.revisionId);
   });
@@ -181,9 +181,9 @@ describe("transactional commands", () => {
   it("rejects a new stale competing base before evaluation or persisted model mutation", () => {
     const store = storeAt();
     const base = create(store);
-    const first = accepted(store.execute(change(base), agent, evaluate));
+    const first = accepted(store.execute(change(base), owner, evaluate));
     const competing = vi.fn(evaluate);
-    expect(store.execute(change(base, "competing"), agent, competing)).toEqual({
+    expect(store.execute(change(base, "competing"), owner, competing)).toEqual({
       ok: false,
       code: "stale_base",
     });
@@ -196,14 +196,14 @@ describe("transactional commands", () => {
     const store = storeAt();
     const a = create(store, "p");
     const b = create(store, "q");
-    const p = accepted(store.execute(change(a), agent, evaluate));
-    const q = accepted(store.execute(change(b, "change", "q"), agent, evaluate));
+    const p = accepted(store.execute(change(a), owner, evaluate));
+    const q = accepted(store.execute(change(b, "change", "q"), owner, evaluate));
     const secondCredential = accepted(
-      store.execute(change(p.revisionId), { role: "agent", namespace: "credential-b" }, evaluate),
+      store.execute(change(p.revisionId), { role: "owner", namespace: "credential-b" }, evaluate),
     );
     expect(new Set([p.revisionId, q.revisionId, secondCredential.revisionId]).size).toBe(3);
-    expect(store.execute(change(a), agent)).toEqual(p);
-    expect(store.execute(change(b, "change", "q"), agent)).toEqual(q);
+    expect(store.execute(change(a), owner)).toEqual(p);
+    expect(store.execute(change(b, "change", "q"), owner)).toEqual(q);
   });
 
   it("enforces owner-only metadata authorization before cached replay", () => {
@@ -302,7 +302,7 @@ describe("transactional commands", () => {
     const a = create(store, "p");
     const b = create(store, "q");
     const evaluator = vi.fn(evaluate);
-    expect(store.execute(change(b), agent, evaluator)).toEqual({ ok: false, code: "stale_base" });
+    expect(store.execute(change(b), owner, evaluator)).toEqual({ ok: false, code: "stale_base" });
     expect(evaluator).not.toHaveBeenCalled();
     expect(() => store.readSnapshot("p", b)).toThrow("Revision not found in project");
     expect(() => store.db.prepare("INSERT INTO refs VALUES ('p', 'bad', ?, NULL)").run(b)).toThrow(
@@ -327,7 +327,7 @@ describe("transactional commands", () => {
     const command = change(create(store));
     const before = counts(store);
     expect(() =>
-      store.execute(command, agent, () => {
+      store.execute(command, owner, () => {
         throw new Error("transient");
       }),
     ).toThrow("transient");
@@ -335,14 +335,14 @@ describe("transactional commands", () => {
     store.db.exec(
       "CREATE TRIGGER fail_outcome BEFORE INSERT ON request_outcomes BEGIN SELECT RAISE(ABORT, 'disk-like failure'); END;",
     );
-    expect(() => store.execute(command, agent, evaluate)).toThrow("disk-like failure");
+    expect(() => store.execute(command, owner, evaluate)).toThrow("disk-like failure");
     expect(counts(store)).toEqual(before);
     expect(store.readState("p", "main")).toMatchObject({
       revisionId: command.baseRevision,
       model: { counter: 7 },
     });
     store.db.exec("DROP TRIGGER fail_outcome");
-    accepted(store.execute(command, agent, evaluate));
+    accepted(store.execute(command, owner, evaluate));
   });
 
   it("persists deterministic rejection without changing the head, snapshots or model counters", () => {
@@ -353,9 +353,9 @@ describe("transactional commands", () => {
       code: "budget",
       details: { used: 7, max: 6 },
     }));
-    const result = store.execute(command, agent, reject);
+    const result = store.execute(command, owner, reject);
     expect(result).toEqual({ ok: false, code: "budget", details: { used: 7, max: 6 } });
-    expect(store.execute(command, agent, reject)).toEqual(result);
+    expect(store.execute(command, owner, reject)).toEqual(result);
     expect(reject).toHaveBeenCalledTimes(1);
     expect(store.readState("p", "main")).toMatchObject({
       revisionId: command.baseRevision,
@@ -376,11 +376,11 @@ describe("transactional commands", () => {
       ok: false,
       code: "invalid_command",
     });
-    expect(() => store.execute({ ...command, body: { bad: Infinity } }, agent, evaluate)).toThrow(
+    expect(() => store.execute({ ...command, body: { bad: Infinity } }, owner, evaluate)).toThrow(
       "JSON",
     );
     expect(() =>
-      store.execute(command, agent, (() => Promise.resolve({ ok: true })) as never),
+      store.execute(command, owner, (() => Promise.resolve({ ok: true })) as never),
     ).toThrow("synchronous");
     expect(counts(store)).toEqual(before);
   });
@@ -391,11 +391,11 @@ describe("transactional commands", () => {
     const path = join(dir, "store.sqlite");
     const first = openStore(path);
     const command = change(create(first));
-    const result = accepted(first.execute(command, agent, evaluate));
+    const result = accepted(first.execute(command, owner, evaluate));
     first.close();
     const second = storeAt(path);
-    accepted(second.execute(change(result.revisionId, "later"), agent, evaluate));
-    expect(second.execute(command, agent)).toEqual(result);
+    accepted(second.execute(change(result.revisionId, "later"), owner, evaluate));
+    expect(second.execute(command, owner)).toEqual(result);
   });
 });
 
@@ -465,7 +465,7 @@ describe("metadata validation and brief preconditions", () => {
       });
       expect(store.execute(command, owner, undefined, reject)).toEqual(rejection);
       expect(counts(store)).toEqual([1, 1, 1, 1, 2]);
-      accepted(store.execute(change(base), agent, evaluate));
+      accepted(store.execute(change(base), owner, evaluate));
       expect(store.execute(command, owner, undefined, reject)).toEqual(rejection);
       expect(reject).toHaveBeenCalledTimes(1);
       expect(store.readState("p", "option")).toBeNull();
@@ -585,10 +585,10 @@ describe("metadata validation and brief preconditions", () => {
   it("checks head and brief preconditions before validation and caches missing-project rejection", () => {
     const store = storeAt();
     const missing = change("missing");
-    const result = store.execute(missing, agent, evaluate);
+    const result = store.execute(missing, owner, evaluate);
     expect(result).toEqual({ ok: false, code: "project_not_found" });
     const base = create(store);
-    expect(store.execute(missing, agent, evaluate)).toEqual(result);
+    expect(store.execute(missing, owner, evaluate)).toEqual(result);
     const command: Command = {
       type: "set_brief",
       projectId: "p",
@@ -682,7 +682,7 @@ describe("legacy migration and run persistence", () => {
         { runId: "old-run", turn: 1, transcript: ["legacy"], result: null, spend: { usd: 2 } },
       ]);
       expect(store.finalizeRun("old-run", "infeasible")).toEqual({ ok: false, code: "stale_run" });
-      accepted(store.execute(change("r-old"), agent, evaluate));
+      accepted(store.execute(change("r-old"), owner, evaluate));
       expect(
         store.db.prepare("SELECT snapshot FROM revisions WHERE id = 'r-old'").get()?.snapshot,
       ).toBe('{ "version": 1, "counter": 9 }');
@@ -808,7 +808,7 @@ describe("legacy migration and run persistence", () => {
         accepted(
           store.execute(
             change(base, "advance", "p", stale === "main" ? "main" : "option"),
-            agent,
+            stale === "main" ? owner : agent,
             evaluate,
           ),
         );
