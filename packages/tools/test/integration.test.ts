@@ -201,8 +201,10 @@ describe("registry authorization and direct validation", () => {
   });
 
   it("passes exact trusted runId and never accepts it from parameters", async () => {
-    const execute = vi.fn<Store["execute"]>(() => ({ ok: false, code: "test_rejection" }));
-    const context = { ...ctx, store: { ...store, execute }, runId: "trusted-run" };
+    const execute = vi
+      .spyOn(store, "execute")
+      .mockReturnValue({ ok: false, code: "test_rejection" });
+    const context = { ...ctx, runId: "trusted-run" };
     await call("create_project", create(), context);
     expect(execute.mock.calls[0]?.[1]).toEqual({
       role: "owner",

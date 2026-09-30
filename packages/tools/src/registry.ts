@@ -50,6 +50,11 @@ export function defineTool<P extends TSchema>(tool: ToolDefinition<P>): ToolDefi
           [...ctx.namespace].some((character) => character.charCodeAt(0) < 32)
         )
           return result({ ok: false, code: "unauthorized" });
+        if (tool.name === "review_option" || tool.name === "accept_option") {
+          if (ctx.role !== "owner" || ctx.scope !== undefined)
+            return result({ ok: false, code: "forbidden" });
+          if (ctx.runId !== undefined) return result({ ok: false, code: "invalid_run_binding" });
+        }
         const input = params as { projectId?: string; ref?: string; body?: { sourceRef?: string } };
         if (
           ctx.scope &&

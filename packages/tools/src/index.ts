@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import {
   applyChanges,
   BriefSchema,
@@ -8,16 +9,36 @@ import {
   type Model,
   ModelSchema,
   OpsSchema,
+  type Scorecard,
   scorecard,
   validateBrief,
   validateModel,
 } from "@or1/core";
-import type { Caller, Evaluation, RefState, Rejection } from "@or1/store";
+import type {
+  AcceptanceEvaluator,
+  AcceptanceStates,
+  Caller,
+  Evaluation,
+  RefState,
+  Rejection,
+} from "@or1/store";
+import { MAX_ACCEPTANCE_RECEIPT_BYTES } from "@or1/store";
 import { type TSchema, Type } from "typebox";
 import { defineTool, result, type ToolContext, type ToolDefinition } from "./registry.ts";
+import type { AcceptanceReceipt, PlanReview, ReviewOptionSuccess } from "./review.ts";
 
 export type { ToolContext, ToolDefinition, ToolResult } from "./registry.ts";
 export { defineTool, MAX_TOOL_INPUT_BYTES } from "./registry.ts";
+export type {
+  AcceptanceReceipt,
+  AcceptOptionInput,
+  AcceptOptionResult,
+  AcceptOptionSuccess,
+  PlanReview,
+  ReviewOptionInput,
+  ReviewOptionResult,
+  ReviewOptionSuccess,
+} from "./review.ts";
 
 const strict = <P extends Record<string, TSchema>>(properties: P) =>
   Type.Object(properties, { additionalProperties: false });
@@ -74,6 +95,157 @@ function bindings(
   const problems = bindingProblems(candidate, brief);
   if (problems.length) return { ok: false, code: "invalid_binding", details: problems };
 }
+
+/** Acceptance preserves snapshots exactly, including issued and retired identity counters. */
+function acceptanceEligibility(
+  states: AcceptanceStates,
+  main: Model,
+  option: Model,
+  evaluation: Scorecard,
+  namespace: string,
+  requestId: string,
+): ReviewOptionSuccess["eligibility"] {
+  if (states.source.forkBase?.revisionId !== states.main.revisionId)
+    return { allowed: false, code: "stale_baseline" };
+  for (const [kind, records, base] of [
+    ["wall", option.walls, main.walls],
+    ["opening", option.openings, main.openings],
+    ["space", option.spaces, main.spaces],
+  ] as const) {
+    const existing = new Set(base.map((record) => record.id));
+    if (
+      option.next[kind] < main.next[kind] ||
+      records.some(
+        (record) => !existing.has(record.id) && Number(record.id.slice(1)) < main.next[kind],
+      )
+    )
+      return { allowed: false, code: "invalid_identity" };
+  }
+  if (!evaluation.valid) return { allowed: false, code: "invalid_option" };
+  const receipt: AcceptanceReceipt = {
+    schemaVersion: 1,
+    projectId: states.main.projectId,
+    sourceRef: states.source.ref,
+    sourceRevisionId: states.source.revisionId,
+    briefVersion: states.main.brief.version,
+    baselineRevisionId: states.main.revisionId,
+    evaluatorVersion: evaluation.evaluatorVersion,
+    previousMainRevisionId: states.main.revisionId,
+    requestId,
+    actor: { role: "owner", namespace },
+    scorecard: evaluation,
+  };
+  if (Buffer.byteLength(JSON.stringify(receipt)) > MAX_ACCEPTANCE_RECEIPT_BYTES)
+    return { allowed: false, code: "score_too_large" };
+  return { allowed: true };
+}
+
+export const reviewOption = defineTool({
+  name: "review_option",
+  description:
+    "Owner-only coherent review of an option against current main and the current brief.",
+  parameters: strict({
+    projectId: identifier,
+    ref: Type.String({ ...identifier, not: { const: "main" } }),
+  }),
+  mutates: false,
+  async execute(params, ctx) {
+    const read = ctx.store?.readReview(params.projectId, params.ref);
+    if (!read) return result({ ok: false, code: "store_unavailable" });
+    if (!read.ok) return result(read);
+    const { main, source } = read.states;
+    const baseline = current(main);
+    const candidate = current(source);
+    if (!source.forkBase) return result({ ok: false, code: "stale_baseline" });
+    // Validate persisted baseline data, but never use its historical score as acceptance evidence.
+    model(source.forkBase.model);
+    const plan = (state: RefState, candidate: Model): PlanReview => {
+      const { spaces, openings, adjacencies, slab, problems } = derive(candidate);
+      return {
+        revisionId: state.revisionId,
+        model: candidate,
+        derived: { spaces, openings, adjacencies, slab, problems },
+        scorecard: scorecard(candidate, baseline.brief, baseline.model),
+      };
+    };
+    const mainReview = plan(main, baseline.model);
+    const option = plan(source, candidate.model);
+    const review: ReviewOptionSuccess = {
+      ok: true,
+      projectId: params.projectId,
+      ref: params.ref,
+      briefVersion: main.brief.version,
+      baselineRevisionId: source.forkBase.revisionId,
+      brief: baseline.brief,
+      main: mainReview,
+      option,
+      // Review reserves the maximum bounded request-ID size; the store checks the actual receipt.
+      eligibility: acceptanceEligibility(
+        read.states,
+        baseline.model,
+        candidate.model,
+        option.scorecard,
+        ctx.namespace as string,
+        "\ud800".repeat(128),
+      ),
+    };
+    return result(review);
+  },
+});
+
+export const acceptOption = defineTool({
+  name: "accept_option",
+  description:
+    "Owner-only acceptance of an exactly pinned, freshly valid option snapshot into main.",
+  parameters: strict({
+    projectId: identifier,
+    ref: Type.Literal("main"),
+    baseRevision: identifier,
+    requestId: identifier,
+    body: strict({
+      sourceRef: Type.String({ ...identifier, not: { const: "main" } }),
+      sourceRevisionId: identifier,
+      briefVersion: version,
+      baselineRevisionId: identifier,
+      evaluatorVersion: identifier,
+    }),
+  }),
+  mutates: true,
+  async execute(params, ctx) {
+    const evaluate: AcceptanceEvaluator = (states) =>
+      metadataValidation<ReturnType<AcceptanceEvaluator>>(() => {
+        const baseline = current(states.main);
+        const candidate = current(states.source);
+        if (states.source.forkBase) model(states.source.forkBase.model);
+        const evaluation = scorecard(candidate.model, baseline.brief, baseline.model);
+        // This check belongs after store replay: evaluator upgrades must not invalidate exact retries.
+        if (params.body.evaluatorVersion !== evaluation.evaluatorVersion)
+          return { ok: false, code: "stale_evaluator" };
+        const eligibility = acceptanceEligibility(
+          states,
+          baseline.model,
+          candidate.model,
+          evaluation,
+          ctx.namespace as string,
+          params.requestId,
+        );
+        if (!eligibility.allowed)
+          return {
+            ok: false,
+            code: eligibility.code,
+            ...(eligibility.code === "invalid_option"
+              ? { details: evaluation.gates.filter((gate) => !gate.passed) }
+              : {}),
+          };
+        return {
+          ok: true,
+          evaluation: { evaluatorVersion: evaluation.evaluatorVersion, result: evaluation },
+        };
+      });
+    const outcome = ctx.store?.execute({ ...params, type: "accept_option" }, caller(ctx), evaluate);
+    return result(outcome as NonNullable<typeof outcome>);
+  },
+});
 
 export const inspectProject = defineTool({
   name: "inspect_project",
@@ -254,4 +426,6 @@ export const tools: readonly ToolDefinition[] = [
   createProject,
   forkRef,
   setBrief,
+  reviewOption,
+  acceptOption,
 ];

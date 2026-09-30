@@ -2,7 +2,8 @@
 
 `tools` is the ordered, adapter-independent TypeBox definition set. `inspect_project`
 is first. Definitions are exported individually as `inspectProject`, `scorecardTool`,
-`applyChangesTool`, `createProject`, `forkRef`, and `setBrief`; the public types are
+`applyChangesTool`, `createProject`, `forkRef`, `setBrief`, `reviewOption`, and
+`acceptOption`; the public types are
 `ToolContext`, `ToolDefinition`, and `ToolResult`. Core model, brief, and operation
 schemas are reused directly, not redeclared in adapters.
 
@@ -24,7 +25,10 @@ but absent credentials return `unauthorized` and an absent store returns
 tool definitions (including anonymous MCP `tools/list`) needs no execution context.
 Namespace, role, scope and run ID are never tool parameters. Unknown parameters
 are rejected. Scope is enforced before store access/replay; forks must satisfy it
-for both the target and source ref.
+for both the target and source ref. `review_option` and `accept_option` require an
+owner credential, reject **any** scope (they touch both main and the option), and
+reject trusted run bindings as `invalid_run_binding`, all before store access or
+cached replay. Nonowners and scoped credentials receive `forbidden`.
 
 All results are `{ text, data }`. `data` contains the structured read or command
 outcome. Input failures, core `InputError`s, and domain rejections return
@@ -36,7 +40,7 @@ before checking size. Core numeric and geometry resource limits also apply.
 
 ## Read parameters and outputs
 
-Both read tools accept only `{ projectId, ref? }`, with ref defaulting to `main`.
+The existing read tools accept only `{ projectId, ref? }`, with ref defaulting to `main`.
 They validate current v2 model shape/topology and brief semantics without repairing
 persisted data or inferring v1 assignment migration.
 
@@ -65,7 +69,8 @@ versions are nonnegative safe integers, distinct from JSON `schemaVersion`.
 | `create_project` | `{ model, brief }` | Owner only, ref `main`, baseRevision null, explicit v2. |
 | `fork_ref` | `{ sourceRef }` | Owner only; ref is the new target (never main), baseRevision pins source head. |
 | `set_brief` | `{ brief }` | Owner only; pins target head and project-wide brief content version. |
-| `apply_changes` | `{ ops, briefVersion, baselineRevisionId }` | Credential role passed to core policy; requires both context pins, including null baseline on main. |
+| `apply_changes` | `{ ops, briefVersion, baselineRevisionId }` | Main is owner-only (store-enforced before replay); options pass credential role to core policy. Requires both context pins, including null baseline on main. |
+| `accept_option` | `{ sourceRef, sourceRevisionId, briefVersion, baselineRevisionId, evaluatorVersion }` | Owner only, ref `main`, nonnull baseRevision, no scope/run binding; exact pinned snapshot acceptance. |
 
 Mutation `data` is the store command outcome: `{ ok: true, revisionId,
 briefVersion, effects }` or a rejection. Stale geometry, brief and baseline pins
@@ -87,6 +92,62 @@ after geometry or brief changes, without rerunning evaluators/metadata validator
 Keep the original command and pins on a retry. Changing commands, pins or roles
 under the same request key conflicts. Authorization and scope always precede
 replay. The registry never writes SQL or alters historical snapshots/briefs.
+
+## Option review and snapshot acceptance
+
+`review_option` requires `{ projectId, ref }` with a nonmain ref. `store.readReview`
+captures main, source, immutable fork snapshot, and the current project-wide brief
+coherently. Its success is `{ ok: true, projectId, ref, briefVersion,
+baselineRevisionId, brief, main, option, eligibility }`. Both plans are
+`{ revisionId, model, derived, scorecard }`, with the same serializable derived
+fields as `inspect_project`. Main is scored against itself; the option is scored
+against **returned current main**, not its historical fork. The older `scorecard`
+tool keeps its historical-fork scoring contract unchanged. Stale-baseline options
+remain viewable, but `eligibility` is `{ allowed: false, code: "stale_baseline" }`.
+Other ineligibility codes are `invalid_identity`, `invalid_option`, and
+`score_too_large`; otherwise it is `{ allowed: true }`. This advisory read does not
+reserve any pins. Persisted v1, malformed, or out-of-bounds models/briefs reject;
+neither review nor acceptance migrates, rederives identities, or repairs snapshots.
+
+`accept_option` requires the mutation envelope with literal ref `main` and a
+nonnull `baseRevision`. Its strict body has exactly `sourceRef` (nonmain),
+`sourceRevisionId`, `briefVersion`, `baselineRevisionId` (nonnull), and
+`evaluatorVersion`. Client scorecards, run evidence, model snapshots, actor,
+namespace, and role are not accepted. Store verifies all pins in `BEGIN IMMEDIATE`;
+the source fork baseline must equal current main, so no merge or rebase occurs.
+Main/source/brief/baseline mismatches reject independently as `stale_base`,
+`stale_source`, `stale_brief`, and `stale_baseline`.
+
+The synchronous registry evaluator validates core inputs, scores source against
+current main/current brief, and checks the expected evaluator version inside the
+callback (`stale_evaluator`). Every core hard gate must pass; `invalid_option`
+includes the actual failed gate results and findings. Protected walls/openings
+remain host-relative, even for owner-authored options. Scores retain
+`certification: "none"` and concept-design/heuristic gate bases: acceptance does
+not certify a plan. Manual and agent options follow exactly the same eligibility
+rules; run status, outcome, and stored evidence are never consulted.
+
+Candidate next counters must not regress. An ID absent from current main must
+have a numeric suffix at least its corresponding main next counter. Violations
+return `invalid_identity`, not renamed IDs or adjusted counters. Combined with an
+unchanged-main fork baseline, this prevents retired or divergent identity reuse.
+
+Success is `{ ok: true, revisionId, briefVersion, effects: [], acceptance }`. The
+store copies the source snapshot **unchanged**, preserving counters/tags/IDs, and
+appends a new main revision with provenance. The receipt contains all body pins
+plus `{ schemaVersion: 1, projectId, previousMainRevisionId, requestId,
+actor: { role: "owner", namespace }, scorecard }`. The full receipt is limited to
+65,536 UTF-8 JSON bytes by the store; the registry shares that bound. Review
+conservatively reserves the maximum bounded request-ID encoding, while acceptance
+checks the actual request ID. Exact retries return the original receipt without
+rescoring, even after head/brief/evaluator changes; authorization still precedes
+replay. Changing submitted evaluator or context pins conflicts with the request key.
+
+Browser consumers may use `import type` from `@or1/tools`; `src/review.ts` contains
+only type imports and DTO exports, never Node/registry runtime code. Public DTOs
+are `ReviewOptionInput`, `PlanReview`, `ReviewOptionSuccess`, `ReviewOptionResult`,
+`AcceptOptionInput`, `AcceptanceReceipt` (scorecard narrowed to core `Scorecard`),
+`AcceptOptionSuccess`, and `AcceptOptionResult`, exported type-only from the index.
 
 ## Requirement identity and brief edits
 
