@@ -111,6 +111,60 @@ const run = await runner.start({
 configuration (including stale initial pins or concurrent starts on this runner). Once created,
 run-level failures are recorded as terminal outcomes/status and a bounded settlement reason.
 
+## Private ChatGPT-subscription adapter
+
+`createSubscription()` in `src/subscription.ts` is a programmatic, Node-host-only adapter for the
+preferred pi 0.99.1 `openaiProvider()` **Sign in with ChatGPT** OAuth flow. It exposes only:
+
+```ts
+login(interaction: AuthInteraction, options?: LoginOptions): Promise<void>
+list(): Promise<{ id: string; name: string }[]>
+select(modelId: string): Promise<{ model: Model<Api>; streamFn: StreamFn }>
+```
+
+One session owns one private authenticated pi `Models` instance and its default in-memory credential
+store. Keep that session for login, selection and every run; a new session/restarted process requires
+another explicit login. Tokens are not returned, written to files, imported from Amp/Codex or sent
+through browser application credential storage/HTTP routes. API-key auth is removed from the provider
+and ambient auth lookup is disabled; `OPENAI_API_KEY` is never a fallback. Construction, listing and
+selection do not authorize or call a model. Listing/selection fail before login. Available means pi's
+authenticated local catalog, **not a network-verified subscription entitlement**; a provider may still
+deny a listed model at inference time. Unknown/unavailable models fail before stream dispatch.
+
+```ts
+import { createSubscription } from "./src/subscription.ts";
+
+const subscription = createSubscription();
+// Human explicitly authorizes login. Host owns Node AuthInteraction, never persists its input,
+// and supplies the SAME stable bare installation UUID for every subsequent login.
+await subscription.login(interaction, { getDeviceId: () => installationUuid });
+const availableModels = await subscription.list();
+const { model, streamFn } = await subscription.select(explicitModelId);
+const runner = createRunRunner({ store, context: agentContext, model, streamFn });
+```
+
+The host must arrange stable installation metadata; this adapter never generates a fresh host ID.
+The preferred flow requires a valid bare UUID and uses browser PKCE authorization with loopback
+callback `http://127.0.0.1:1455/auth/callback`. Its manual fallback takes the **full redirect URL**
+(including code, state and issued client ID), not just a code. Honor both `AuthInteraction.signal` and
+each prompt's own signal: a successful callback cancels its competing manual prompt. Keep prompt
+responses and authorization URLs out of logs, ledgers and browser transport. There is **no device-code
+flow for the new OpenAI provider in 0.99.1**. Legacy `openaiCodexProvider()` has device login but is not
+enabled here; its credentials are not interchangeable with the preferred flow.
+
+The selected `StreamFn` rechecks availability and rejects altered model metadata/endpoints. It calls
+the same `Models.streamSimple` so pi owns serialized credential refresh. It forwards `signal`,
+`timeoutMs`, `maxTokens`, `maxRetries` and reasoning; it does not forward API-key/header/environment,
+payload, custom-fetch or transport-observer overrides. Upstream error bodies/causes and diagnostics
+are not exposed in model-facing messages or persisted-message candidates. Failures use bounded
+application-owned messages; normal content, replay signatures and usage are preserved. The host's
+login interaction is trusted and must not log credentials or redirect input.
+
+**Budget caveat:** pi 0.99.1's new OpenAI subscription request shaping deliberately omits
+`max_output_tokens` even when `maxTokens` is forwarded. Runner token accounting/cancellation still
+apply, but this is not a provider-side hard output/quota cap. Login and inference must remain explicit
+human/host actions; adapter tests mock provider network boundaries and spend no model quota.
+
 ## Execution and outcome contract
 
 - One pi `Agent` on one scoped option ref. Only `inspect_project`, `apply_changes`, and `scorecard`
