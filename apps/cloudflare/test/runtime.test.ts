@@ -492,6 +492,7 @@ describe("isolated development review bypass in native workerd", () => {
       setClock(ms: number, expireOnRead?: number, expiredAt?: number): Promise<void>;
       expireAfterReview(ms: number): Promise<void>;
       lastReviewContext(): Promise<unknown>;
+      delayedReview(before: number, expiresAt: number): Promise<{ status: number; body: string }>;
       request(
         target: string,
         url: string,
@@ -760,11 +761,21 @@ describe("isolated development review bypass in native workerd", () => {
     expect(await tables()).toEqual([]);
   });
 
+  it("rejects direct DO expiry during a delayed body before identity or store initialization", async () => {
+    const native = await probe();
+    expect(await tables()).toEqual([]);
+    const response = await native.delayedReview(now, expiresAt);
+    expect(response.status).toBe(401);
+    expect(JSON.parse(response.body)).toEqual({ ok: false, code: "unauthorized" });
+    expect(await tables()).toEqual([]);
+    expect(await native.lastReviewContext()).toBeUndefined();
+  });
+
   it("rechecks after awaited session and review work in both DO and Worker", async () => {
     const clock = await probe();
     const stub = await direct();
-    // Direct session: entry is read 1, post-body/session is read 2.
-    await clock.setClock(now, 2, expiresAt);
+    // Direct session: entry, post-body, then post-session deadline.
+    await clock.setClock(now, 3, expiresAt);
     expect(
       (
         await stub.fetch(`${developmentOrigin}/api/session`, {
@@ -772,14 +783,14 @@ describe("isolated development review bypass in native workerd", () => {
         })
       ).status,
     ).toBe(401);
-    // Worker session: Worker entry, DO entry, DO success, then Worker post-await.
-    await clock.setClock(now, 4, expiresAt);
+    // Worker session: Worker entry, DO entry/body/success, then Worker post-await.
+    await clock.setClock(now, 5, expiresAt);
     expect((await session()).status).toBe(401);
     await clock.setClock(now);
     await seed();
     const before = await snapshot();
-    // Worker review: its post-await deadline follows both DO deadline reads and token expiry.
-    await clock.setClock(now, 5, expiresAt);
+    // Worker review: its post-await deadline follows the DO entry/body/review and token expiry.
+    await clock.setClock(now, 6, expiresAt);
     expect((await review("")).status).toBe(401);
     await clock.setClock(now);
     // Review succeeds in the real registry, then the test-only observer crosses expiry.

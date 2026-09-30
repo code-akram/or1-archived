@@ -70,6 +70,44 @@ export class Probe extends DurableObject<Env> {
     return { status: response.status, body: await response.text() };
   }
 
+  async delayedReview(before: number, expiresAt: number) {
+    let release: (() => void) | undefined;
+    const entered = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // Let the DO pass its entry deadline before releasing the body at exact expiry.
+    Date.now = () => {
+      release?.();
+      return before;
+    };
+    const body = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        await entered;
+        Date.now = () => expiresAt;
+        controller.enqueue(
+          new TextEncoder().encode(
+            JSON.stringify({ projectId: "demo-workspace", ref: "option-a" }),
+          ),
+        );
+        controller.close();
+      },
+    });
+    const response = await this.env.PROJECTS.get(
+      this.env.PROJECTS.idFromName("demo-workspace"),
+    ).fetch(
+      new Request(`${this.env.PUBLIC_ORIGIN}/api/tools/review_option`, {
+        method: "POST",
+        headers: {
+          "X-Or1-Project-Id": "demo-workspace",
+          Origin: this.env.PUBLIC_ORIGIN,
+          "Content-Type": "application/json",
+        },
+        body,
+      }),
+    );
+    return { status: response.status, body: await response.text() };
+  }
+
   async check() {
     const driver = sqlDriver(this.ctx.storage);
     const store = createStore(driver);

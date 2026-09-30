@@ -36,6 +36,7 @@ export class Project extends DurableObject<Env> {
       const route = apiChecks(request, this.env);
       const { config, project } = this.#boundProject(request.headers.get("X-Or1-Project-Id") ?? "");
       const body = await bytes(request.body, MAX_REQUEST_BYTES);
+      checkDevelopmentReviewDeadline(config.developmentReviewExpiresAt);
       if (route === "session" && body.length) throw new HttpError(400, "invalid_input");
       // Mode comes only from validated deployment configuration, never headers or JWT fallback.
       const identity =
