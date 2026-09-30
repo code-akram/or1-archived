@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@or1/core": "workspace:*",
+    "@or1/tools": "workspace:*",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "three": "0.186.1"

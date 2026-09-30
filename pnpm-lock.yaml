@@ -38,6 +38,9 @@ importers:
       '@or1/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@or1/tools':
+        specifier: workspace:*
+        version: link:../../packages/tools
       react:
         specifier: 19.3.0
         version: 19.3.0
