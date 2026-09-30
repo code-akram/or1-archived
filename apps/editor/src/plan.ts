@@ -1,8 +1,9 @@
-import type { Opening, Point, Ring, Wall } from "@or1/core";
-import type { PlanReview } from "@or1/tools";
+import type { Derived, Model, Opening, Point, Ring, Wall } from "@or1/core";
 
 /** Presentation bounds only; all room/slab geometry comes from the server's derived rings. */
-export function comparisonBounds(plans: readonly PlanReview[]) {
+export function comparisonBounds(
+  plans: readonly { model: Model; derived: Pick<Derived, "slab" | "spaces"> }[],
+) {
   let x0 = Infinity;
   let y0 = Infinity;
   let x1 = -Infinity;
@@ -50,4 +51,33 @@ export function openingSegment(wall: Wall, opening: Opening) {
     y: wall.start.y + dy * distance,
   });
   return { start: point(opening.offset), end: point(opening.offset + opening.width), dx, dy };
+}
+
+function inside(point: Point, ring: readonly Point[]) {
+  let hit = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const a = ring[i] as Point;
+    const b = ring[j] as Point;
+    if (
+      a.y > point.y !== b.y > point.y &&
+      point.x < ((b.x - a.x) * (point.y - a.y)) / (b.y - a.y) + a.x
+    )
+      hit = !hit;
+  }
+  return hit;
+}
+
+/** Readable label position: the clear floor's bounding-box centre when inside it, else its anchor. */
+export function labelPoint(space: { anchor: Point; clear: readonly Ring[] }): Point {
+  const points = space.clear.flat();
+  if (!points.length) return space.anchor;
+  const xs = points.map((p) => p.x);
+  const ys = points.map((p) => p.y);
+  const centre = {
+    x: (Math.min(...xs) + Math.max(...xs)) / 2,
+    y: (Math.min(...ys) + Math.max(...ys)) / 2,
+  };
+  // Even-odd over every ring, matching how the clear floor is filled.
+  const count = space.clear.filter((ring) => inside(centre, ring)).length;
+  return count % 2 === 1 ? centre : space.anchor;
 }

@@ -4,15 +4,16 @@ An agent-native architecture editor for concept and schematic design. The archit
 
 V0 is parallel test-fits: the architect enters a shell and a brief, N agents each produce a layout option, and each option comes back with a scorecard and a rendered plan.
 
-Status: the v2 core, transactional SQLite mutation path, shared tool registry, and first bounded
-persisted single-option pi workflow are implemented, with a minimal authenticated SVG option-review
-UI and owner-only transactional acceptance into main. Requirements use explicit space assignments;
-scorecards pass configured concept-design checks, **not building-code certification**. Default
-HTTP/MCP exposes no unauthenticated project access or mutation. Run generation is private and local
-(programmatic or the explicit evaluation command below);
-geometry editing UI, automatic recovery/resume, and the full agent/diversity evaluation suite remain
-future work. Deterministic injected pi streams verify the workflow without spending on external
-model APIs; they do not establish model design quality.
+Status: the v2 core, transactional SQLite mutation path, shared tool registry and persisted pi
+workflow are implemented, with a local **test-fit studio**: enter a rectangular shell and a room
+brief, let several agents build options in parallel (each on its own option ref, with a different
+design direction), compare them at one scale with their scorecards, and accept one into main.
+Requirements use explicit space assignments; scorecards pass configured concept-design checks,
+**not building-code certification**. Default HTTP/MCP exposes no unauthenticated project access or
+mutation; generation is local and owner-only. Free-form geometry editing, non-rectangular shells,
+automatic recovery/resume and a scored diversity benchmark remain future work. Deterministic
+injected pi streams verify the workflow without spending on external model APIs; they do not
+establish model design quality.
 See the [geometry contract](packages/core/docs/geometry-contract.md) and
 [brief and scorecard contract](packages/core/docs/brief-and-scorecard.md) for supported behavior and limitations.
 
@@ -37,7 +38,7 @@ before any real data/hosted writes, whichever comes first; see the runbook for e
 | `packages/store` | Portable SQLite engine + Node driver: revisions, refs, briefs, redlines, runs, request outcomes |
 | `apps/server` | HTTP API + SSE, MCP server (`/mcp`), run orchestrator (pi agents) |
 | `apps/cli` | `or1` command line |
-| `apps/editor` | Browser option review (Vite, React, SVG) |
+| `apps/editor` | Browser studio and option review (Vite, React, SVG) |
 | `apps/cloudflare` | Access-verified read-only API and project SQLite Durable Objects |
 | `evals` | Fixtures, importers and eval scenarios |
 
@@ -55,6 +56,30 @@ pnpm or1 tools    # CLI
 ```
 
 Project data lives in `~/.local/share/or1` (`OR1_DATA_DIR` overrides it), never in this repo.
+
+## Test-fit studio
+
+```sh
+pnpm studio                      # build the editor, log in to ChatGPT, serve http://127.0.0.1:4310
+pnpm studio -- --model <id>      # skip the model prompt
+pnpm studio -- --offline         # no login: review and acceptance only
+```
+
+The studio asks you to authorize your own ChatGPT subscription in the terminal (tokens stay in
+memory; no API-key fallback), then prints a link whose `#token=` fragment carries a fresh random
+owner token. Browsers never send a fragment to the server; the editor moves it into page memory and
+removes it from the address bar. From a remote machine, forward the port first
+(`ssh -L 4310:127.0.0.1:4310 <runner>`), and during login also 1455 for the OAuth callback, or paste
+the full redirect URL into the terminal.
+
+In the editor, start from a preset or enter the shell (width, depth, wall, entrance, windows) and
+brief (rooms with minimum/target areas, daylight and required doors); the core validates both as
+you type. **Generate** forks one option ref per agent from main and runs the agents in parallel,
+each with a different direction (linear spine, compact hub, daylight first, social/quiet zones,
+other axis) plus your optional batch note. Runs have **no wall-clock limit**, get a fresh
+hard-gate summary after every commit, and stop as soon as the option passes every hard gate; a run
+stopped by a runaway guard still keeps a freshly valid option. Cards update live; review one to
+compare it with main and accept it. Accepting makes the sibling options stale (still viewable).
 
 ## Private test-fit evaluations
 
@@ -80,7 +105,8 @@ pnpm eval --fixture synthetic-hall-living-study --mode subscription
 
 Live mode loads only the shell and brief, not witness solutions. OAuth tokens stay in process memory;
 there is no paid API-key fallback or public agent endpoint. The authenticated model list is a local
-catalog, not verified entitlement. Runner accounting/cancellation is **not a hard provider quota
+catalog, not verified entitlement. Runs have no wall-clock deadline (Ctrl+C cancels) and finish once
+the option passes every hard gate. Runner budgets are runaway guards, **not a hard provider quota
 cap**. See the [evaluation and local review instructions](apps/server/README.md#private-evaluation-command)
 for remote-browser login, output interpretation and explicit owner review.
 
@@ -88,8 +114,9 @@ for remote-browser login, output interpretation and explicit owner review.
 
 The local review API is opt-in: configure a strong `OR1_OWNER_TOKEN` (at least 32 bearer-safe
 characters) in the server environment, then run the server on loopback and the editor. Enter the
-token in the editor's password field and an existing project ID and option ref. The token stays in
-browser memory; do not put it in a URL, Vite environment variable, committed file, or browser storage.
+token in the editor's password field and an existing project ID and option ref (or open the studio
+link above). The token stays in browser memory; apart from the studio's one-time `#token=` fragment,
+do not put it in a URL, Vite environment variable, committed file, or browser storage.
 See [local owner configuration](apps/server/README.md#local-owner-review-api) for the database path
 and transport contract. This credential grants owner access to the local database, not just the
 project entered in the UI. Do not expose this development service to a network.
@@ -111,8 +138,8 @@ retried with its original request ID and pins, not a newly generated command.
   explicit brief/baseline pins, and requirement-ID lineage.
 - [Store](packages/store/README.md): atomic revisions/ref/run cursors/request outcomes,
   canonical idempotent replay, historical migrations, and exact evaluation pins.
-- [Run workflow](apps/server/README.md): bounded single-option execution, cancellation, persisted
-  tool intents/results, fail-closed restart, and supported programmatic invocation.
+- [Run workflow](apps/server/README.md): scoped single-option execution, the multi-agent studio,
+  cancellation, persisted tool intents/results, fail-closed restart, and programmatic invocation.
 
 Legacy v1 documents stay intact. `migrateV1` is an explicit import helper; repeated-program briefs
 require a reviewed v2 replacement rather than inferred allocation. There is no in-place history

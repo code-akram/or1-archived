@@ -193,7 +193,10 @@ the cursor; the registry must not permit callers to forge a workflow binding.
 - `saveRunTurn({ runId, turn, transcript, result, spend })` appends a unique
   nonnegative safe-integer turn. The combined canonical JSON values are limited
   to `MAX_RUN_TURN_BYTES` (65,536 UTF-8 bytes); duplicates do not overwrite history.
-- `readRunTurns(runId)` returns those records ordered by turn number.
+- `readRunTurns(runId)` returns those records ordered by turn number;
+  `readLastRunTurn(runId)` returns only the latest (its cumulative spend), or null.
+- `listProjects()`, `listRefs(projectId)` and `listRuns(projectId)` are read-only listings
+  (creation order for projects and runs, name order for refs) for owner navigation.
 
 ```ts
 type RunEvaluation = {

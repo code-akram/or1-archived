@@ -15,6 +15,7 @@
     "dev:server": "pnpm --filter @or1/server dev",
     "dev:editor": "pnpm --filter @or1/editor dev",
     "eval": "pnpm --filter @or1/server eval",
+    "studio": "pnpm --filter @or1/editor build && pnpm --filter @or1/server studio",
     "or1": "pnpm --filter @or1/cli start"
   },
   "devDependencies": {

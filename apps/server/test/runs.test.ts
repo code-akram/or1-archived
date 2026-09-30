@@ -285,9 +285,12 @@ describe("bounded persisted pi workflow", () => {
         scores: [{ score: "area_fit", value: 1 }],
         requirements: [{ id: "office", quantity: 1, present: 1, spaces: ["S1"] }],
       });
-      expect(settled(reloaded).spend).toMatchObject({ tokens: 20, toolCalls: 1, rejections: 0 });
+      // The valid commit ends the run: no closing model turn is requested or awaited.
+      expect(settled(reloaded).spend).toMatchObject({ tokens: 10, toolCalls: 1, rejections: 0 });
+      expect(stream).toHaveBeenCalledTimes(1);
       const sent = stream.mock.calls[0]?.[2];
-      expect(sent).toMatchObject({ maxTokens: DEFAULT_RUN_BUDGET.maxTokens, maxRetries: 0 });
+      expect(sent).toMatchObject({ maxTokens: model.maxTokens, maxRetries: 0 });
+      expect(sent).not.toHaveProperty("timeoutMs");
       const turns = reloaded.readRunTurns("run");
       const review = (await execute(reloaded, "review_option", {
         projectId: "p",
@@ -437,7 +440,11 @@ describe("bounded persisted pi workflow", () => {
           }
         },
       );
-      const run = await runner(fixture, stream).start({ id: "run", instruction: "Try" });
+      const run = await runner(fixture, stream).start({
+        id: "run",
+        instruction: "Try",
+        finishOnValid: false,
+      });
       expect(run).toMatchObject({ status: "failed", outcome: null, evaluation: null });
       expect(run.revisionId).not.toBe(fixture.initial.revisionId);
       expect(settled(fixture.store).transcript.reason).toBe("stale_or_finished_run");
@@ -470,7 +477,7 @@ describe("bounded persisted pi workflow", () => {
     { budget: { maxToolCalls: 1 }, expected: "tool_limit", committed: true },
     { budget: { maxRejections: 1 }, expected: "rejection_limit", committed: false },
   ])(
-    "synchronously enforces $expected before subsequent writes",
+    "synchronously enforces $expected before subsequent writes, keeping only a freshly valid head",
     async ({ budget, expected, committed }) => {
       const fixture = await setup();
       const first =
@@ -483,7 +490,12 @@ describe("bounded persisted pi workflow", () => {
         instruction: "Try",
         budget,
       });
-      expect(run.outcome).toBe("not_found_within_budget");
+      // A budget stop after a valid commit still found that exact option; otherwise nothing was found.
+      expect(run.outcome).toBe(committed ? "options" : "not_found_within_budget");
+      expect(run.evaluation).toMatchObject({
+        revisionId: run.revisionId,
+        result: { valid: committed },
+      });
       expect(settled(fixture.store).transcript.reason).toBe(expected);
       expect(run.revisionId === fixture.initial.revisionId).toBe(!committed);
       expect(
@@ -524,7 +536,7 @@ describe("bounded persisted pi workflow", () => {
       instruction: "Try",
       budget: { maxToolCalls: 2, maxRejections: 10 },
     });
-    expect(run.outcome).toBe("not_found_within_budget");
+    expect(run.outcome).toBe("options");
     expect(driver).toHaveBeenCalledTimes(1);
     expect(settled(fixture.store).transcript.reason).toBe("tool_limit");
     expect(settled(fixture.store).spend).toMatchObject({ toolCalls: 2, rejections: 1 });
@@ -707,6 +719,109 @@ describe("bounded persisted pi workflow", () => {
     expect(settled(fixture.store).transcript.reason).toBe("timeout");
   });
 
+  it("keeps a freshly valid head when the deadline expires during the model's closing turn", async () => {
+    // Regression for live trial test-fit-AKtH8i: gates passed, then the closing message timed out.
+    const fixture = await setup();
+    let count = 0;
+    const first = script([answer([call("edit")])]);
+    const driver: StreamFn = (selected, transcript, settings) =>
+      count++ === 0 ? first(selected, transcript, settings) : createAssistantMessageEventStream();
+    vi.useFakeTimers();
+    const task = runner(fixture, driver).start({
+      id: "run",
+      instruction: "Try",
+      budget: { maxDurationMs: 50 },
+      finishOnValid: false,
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    const run = await task;
+    expect(count).toBe(2);
+    expect(run).toMatchObject({ status: "done", outcome: "options" });
+    expect(run.revisionId).not.toBe(fixture.initial.revisionId);
+    expect(run.evaluation).toMatchObject({ revisionId: run.revisionId, result: { valid: true } });
+    expect(settled(fixture.store).transcript.reason).toBe("timeout");
+  });
+
+  it("has no wall-clock deadline by default", async () => {
+    const fixture = await setup();
+    const slow = script([
+      answer([{ type: "toolCall", id: "inspect", name: "inspect_project", arguments: {} }]),
+      answer([call("edit")]),
+    ]);
+    let count = 0;
+    const driver: StreamFn = async (selected, transcript, settings) => {
+      // Ten simulated minutes per provider response, far beyond the former 60 s limit.
+      if (count++ > 0) await new Promise((resolve) => setTimeout(resolve, 600_000));
+      return slow(selected, transcript, settings);
+    };
+    vi.useFakeTimers();
+    const task = runner(fixture, driver).start({ id: "run", instruction: "Try" });
+    await vi.advanceTimersByTimeAsync(600_000);
+    const run = await task;
+    expect(run).toMatchObject({ status: "done", outcome: "options" });
+    expect(run.budget).toMatchObject({ maxDurationMs: null });
+    expect(settled(fixture.store).transcript.reason).toBeNull();
+  });
+
+  it.each([0, -1, 1.5, 86_400_001])("rejects an invalid explicit deadline %s", async (value) => {
+    const fixture = await setup();
+    await expect(
+      runner(fixture, script([])).start({
+        id: "run",
+        instruction: "Try",
+        budget: { maxDurationMs: value },
+      }),
+    ).rejects.toThrow("Invalid run budget: maxDurationMs");
+    expect(fixture.store.readRun("run")).toBeNull();
+  });
+
+  it("returns fresh failing gates with each commit and ends only once the head is valid", async () => {
+    const fixture = await setup();
+    const label: Op = { op: "tag_space", space: "S1", label: "Office" };
+    const seen: string[] = [];
+    const replies = script([answer([call("label", [label])]), answer([call("edit")])]);
+    const driver: StreamFn = (selected, transcript, settings) => {
+      const last = transcript.messages.at(-1);
+      if (last?.role === "toolResult")
+        seen.push(last.content.map((block) => ("text" in block ? block.text : "")).join("\n"));
+      return replies(selected, transcript, settings);
+    };
+    const stream = vi.fn(driver);
+    const run = await runner(fixture, stream).start({ id: "run", instruction: "Try" });
+    expect(run.outcome).toBe("options");
+    expect(stream).toHaveBeenCalledTimes(2);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatch(/hard gate\(s\) fail\.\n- required_rooms: /);
+    const results = fixture.store
+      .readRunTurns("run")
+      .filter((turn) => (turn.transcript as { kind: string }).kind === "tool_result")
+      .map((turn) => (turn.result as { content: { text: string }[] }).content.at(-1)?.text);
+    expect(results[0]).toMatch(/fail/);
+    expect(results[1]).toMatch(/every hard gate passes/);
+  });
+
+  it("can keep working after a valid commit when finishOnValid is false", async () => {
+    const fixture = await setup();
+    const stream = vi.fn(script([answer([call("edit")]), answer()]));
+    const run = await runner(fixture, stream).start({
+      id: "run",
+      instruction: "Try",
+      finishOnValid: false,
+    });
+    expect(run.outcome).toBe("options");
+    expect(stream).toHaveBeenCalledTimes(2);
+  });
+
+  it("persists the run's strategy seed", async () => {
+    const fixture = await setup();
+    const run = await runner(fixture, script([answer([call("edit")])])).start({
+      id: "run",
+      instruction: "Try",
+      strategySeed: { id: "compact", label: "Compact hall" },
+    });
+    expect(run.strategySeed).toEqual({ id: "compact", label: "Compact hall" });
+  });
+
   it("bounds UTF-8 transcript bytes before exposing tools, not JS character length", async () => {
     const fixture = await setup();
     const run = await runner(
@@ -798,7 +913,8 @@ describe("bounded persisted pi workflow", () => {
       expect(settled(fixture.store).transcript.reason).toBe(reason);
       const second = await owningRunner.start({ id: "second", instruction: "Try again" });
       expect(second.outcome).toBe("options");
-      expect(count).toBe(3);
+      // The second run's valid commit ends it without a closing model turn.
+      expect(count).toBe(2);
     },
   );
 

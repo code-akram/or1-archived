@@ -368,14 +368,17 @@ describe("local owner HTTP transport", () => {
     expect(await missing.json()).toEqual({ error: "tool_unavailable" });
   });
 
-  it("does not expose other tools, project writes, or model/run starts", async () => {
+  it("does not expose agent tools, forks, or model/run starts without a studio", async () => {
     for (const path of [
       "/runs",
       "/projects",
-      "/tools/create_project",
+      "/tools/fork_ref",
       "/tools/apply_changes",
       "/tools/inspect_project",
       "/tools/start_run",
+      "/studio/status",
+      "/studio/generate",
+      "/api/tools/review_option",
     ])
       expect((await post("{}", {}, path)).status).toBe(404);
   });

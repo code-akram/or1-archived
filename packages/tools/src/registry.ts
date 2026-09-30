@@ -35,6 +35,14 @@ export type ToolDefinition<P extends TSchema = TSchema> = {
   execute(params: Static<P>, ctx: ToolContext): Promise<ToolResult>;
 };
 
+/** Unscoped owner credentials only; never a run binding or a project review capability. */
+const OWNER_TOOLS = new Set([
+  "review_option",
+  "accept_option",
+  "project_overview",
+  "list_projects",
+]);
+
 export function defineTool<P extends TSchema>(tool: ToolDefinition<P>): ToolDefinition<P> {
   return {
     ...tool,
@@ -69,7 +77,7 @@ export function defineTool<P extends TSchema>(tool: ToolDefinition<P>): ToolDefi
           )
             return result({ ok: false, code: "forbidden" });
           if (ctx.runId !== undefined) return result({ ok: false, code: "invalid_run_binding" });
-        } else if (tool.name === "review_option" || tool.name === "accept_option") {
+        } else if (OWNER_TOOLS.has(tool.name)) {
           if (ctx.role !== "owner" || ctx.scope !== undefined)
             return result({ ok: false, code: "forbidden" });
           if (ctx.runId !== undefined) return result({ ok: false, code: "invalid_run_binding" });

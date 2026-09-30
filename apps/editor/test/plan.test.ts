@@ -1,6 +1,6 @@
 import type { Opening, Wall } from "@or1/core";
 import { describe, expect, it } from "vitest";
-import { comparisonBounds, openingSegment, ringsPath } from "../src/plan.ts";
+import { comparisonBounds, labelPoint, openingSegment, ringsPath } from "../src/plan.ts";
 import { reviewFixture } from "./fixtures.ts";
 
 const opening: Opening = {
@@ -65,5 +65,41 @@ describe("SVG presentation", () => {
     expect(bounds.y0).toBeLessThan(-1600);
     expect(bounds.x0 + bounds.width).toBeGreaterThan(8100);
     expect(bounds.y0 + bounds.height).toBeGreaterThan(6100);
+  });
+
+  it("labels a room at its centre only when that centre is on its clear floor", () => {
+    const anchor = { x: 100, y: 100 };
+    const square = [
+      [
+        { x: 0, y: 0 },
+        { x: 4000, y: 0 },
+        { x: 4000, y: 2000 },
+        { x: 0, y: 2000 },
+      ],
+    ];
+    expect(labelPoint({ anchor, clear: square })).toEqual({ x: 2000, y: 1000 });
+    // An L whose bounding-box centre (2000, 2000) lies in the missing quadrant.
+    const ell = [
+      [
+        { x: 0, y: 0 },
+        { x: 4000, y: 0 },
+        { x: 4000, y: 1000 },
+        { x: 1000, y: 1000 },
+        { x: 1000, y: 4000 },
+        { x: 0, y: 4000 },
+      ],
+    ];
+    expect(labelPoint({ anchor, clear: ell })).toEqual(anchor);
+    // A ring with a hole around its centre falls back to the anchor too.
+    const hole = [
+      square[0] ?? [],
+      [
+        { x: 1500, y: 500 },
+        { x: 2500, y: 500 },
+        { x: 2500, y: 1500 },
+        { x: 1500, y: 1500 },
+      ],
+    ];
+    expect(labelPoint({ anchor, clear: hole })).toEqual(anchor);
   });
 });

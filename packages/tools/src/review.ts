@@ -71,3 +71,61 @@ export type AcceptOptionSuccess = {
   acceptance: AcceptanceReceipt;
 };
 export type AcceptOptionResult = AcceptOptionSuccess | Rejection;
+
+/** Latest persisted progress of one agent run; spend is the runner's cumulative accounting. */
+export type RunSummary = {
+  id: string;
+  status: "queued" | "running" | "done" | "failed" | "cancelled" | "interrupted";
+  outcome: "options" | "infeasible" | "not_found_within_budget" | null;
+  strategySeed: unknown;
+  retryCount: number;
+  /** Fresh final score validity pinned with the outcome, or null before settlement. */
+  valid: boolean | null;
+  spend: {
+    tokens?: number;
+    toolCalls?: number;
+    rejections?: number;
+    elapsedMs?: number;
+  } | null;
+  /** Ledger kind of the latest turn, e.g. tool_intent or settled; and its tool name if any. */
+  lastEvent: { kind: string; name?: string; reason?: string | null } | null;
+};
+export type RefOverview = {
+  ref: string;
+  forkBaseRevisionId: string | null;
+  /** True when main has moved past this option's fork baseline (it can no longer be accepted). */
+  stale: boolean;
+  plan: PlanReview;
+  runs: RunSummary[];
+};
+export type ProjectOverview = {
+  ok: true;
+  projectId: string;
+  briefVersion: number;
+  brief: Brief;
+  main: PlanReview;
+  options: RefOverview[];
+};
+export type ProjectOverviewResult = ProjectOverview | Rejection;
+export type ProjectListing = {
+  ok: true;
+  projects: { projectId: string; createdAt: string; name: string | null; options: number }[];
+};
+
+/** A design direction given to one agent so that parallel options genuinely differ. */
+export type Strategy = { id: string; label: string; direction: string };
+export type StudioStatus = {
+  ok: true;
+  agent: { provider: string; id: string; name: string } | null;
+  activeRuns: string[];
+  strategies: readonly Strategy[];
+};
+export type GenerateInput = {
+  projectId: string;
+  count: number;
+  note?: string;
+  strategies?: string[];
+};
+export type GenerateResult =
+  | { ok: true; runs: { ref: string; runId: string; strategy: Strategy }[] }
+  | Rejection;

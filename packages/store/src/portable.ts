@@ -113,8 +113,18 @@ export type PortableStore = {
   readRun(id: string): RunRecord | null;
   saveRunTurn(turn: RunTurn): void;
   readRunTurns(runId: string): RunTurn[];
+  /** Latest persisted turn of a run (its cumulative spend), or null before the first turn. */
+  readLastRunTurn(runId: string): RunTurn | null;
+  /** Read-only listings for owner navigation; they never grant access by themselves. */
+  listProjects(): ProjectSummary[];
+  listRefs(projectId: string): RefSummary[];
+  /** Runs of a project in creation order. */
+  listRuns(projectId: string): RunRecord[];
   close(): void;
 };
+
+export type ProjectSummary = { projectId: string; createdAt: string };
+export type RefSummary = { ref: string; revisionId: string; forkBaseRevisionId: string | null };
 
 export type Caller = {
   role: "owner" | "agent" | "external";
@@ -378,6 +388,16 @@ function bounded(value: unknown, max = 128): value is string {
 }
 
 /** Initialize the shared engine and take ownership of the driver, closing it on init failure. */
+function runTurn(row: SqlRow): RunTurn {
+  return {
+    runId: String(row.run_id),
+    turn: Number(row.turn),
+    transcript: JSON.parse(String(row.transcript)),
+    result: row.result === null ? null : JSON.parse(String(row.result)),
+    spend: JSON.parse(String(row.spend)),
+  };
+}
+
 export function createStore(db: SqlDriver): PortableStore {
   try {
     migrate(db);
@@ -935,16 +955,35 @@ export function createStore(db: SqlDriver): PortableStore {
         ).run(turn.runId, turn.turn, transcript, result, spend);
       }),
     readRunTurns: (runId) =>
+      db.prepare("SELECT * FROM run_turns WHERE run_id = ? ORDER BY turn").all(runId).map(runTurn),
+    readLastRunTurn: (runId) => {
+      const row = db
+        .prepare("SELECT * FROM run_turns WHERE run_id = ? ORDER BY turn DESC LIMIT 1")
+        .get(runId);
+      return row ? runTurn(row) : null;
+    },
+    listProjects: () =>
       db
-        .prepare("SELECT * FROM run_turns WHERE run_id = ? ORDER BY turn")
-        .all(runId)
+        .prepare("SELECT id, created_at FROM projects ORDER BY created_at, id")
+        .all()
+        .map((row) => ({ projectId: String(row.id), createdAt: String(row.created_at) })),
+    listRefs: (projectId) =>
+      db
+        .prepare(
+          "SELECT name, head_revision_id, fork_base_revision_id FROM refs WHERE project_id = ? ORDER BY name",
+        )
+        .all(projectId)
         .map((row) => ({
-          runId: String(row.run_id),
-          turn: Number(row.turn),
-          transcript: JSON.parse(String(row.transcript)),
-          result: row.result === null ? null : JSON.parse(String(row.result)),
-          spend: JSON.parse(String(row.spend)),
+          ref: String(row.name),
+          revisionId: String(row.head_revision_id),
+          forkBaseRevisionId:
+            row.fork_base_revision_id === null ? null : String(row.fork_base_revision_id),
         })),
+    listRuns: (projectId) =>
+      db
+        .prepare("SELECT id FROM runs WHERE project_id = ? ORDER BY rowid")
+        .all(projectId)
+        .map((row) => readRun(String(row.id)) as RunRecord),
     close: () => db.close(),
   };
 }

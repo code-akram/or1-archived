@@ -124,6 +124,34 @@ function history(store: Store) {
   };
 }
 
+describe("owner navigation listings", () => {
+  it("lists projects, refs and runs in stable order and reads only the latest run turn", () => {
+    const store = storeAt(databasePath());
+    const base = setup(store);
+    // Runs list in creation order regardless of their IDs' sort order.
+    startRun(store, "a-later-run", "main");
+    accepted(store.execute({ ...creation, projectId: "q", requestId: "create-q" }, owner));
+    expect(store.listProjects().map((project) => project.projectId)).toEqual(["p", "q"]);
+    expect(store.listRefs("p")).toEqual([
+      { ref: "main", revisionId: base, forkBaseRevisionId: null },
+      { ref: "option", revisionId: base, forkBaseRevisionId: base },
+    ]);
+    expect(store.listRuns("p").map((run) => run.id)).toEqual(["run", "a-later-run"]);
+    expect(store.listRuns("q")).toEqual([]);
+    expect(store.listRefs("missing")).toEqual([]);
+    expect(store.readLastRunTurn("run")).toBeNull();
+    for (const turn of [0, 1, 2])
+      store.saveRunTurn({
+        runId: "run",
+        turn,
+        transcript: { turn },
+        result: null,
+        spend: { turn },
+      });
+    expect(store.readLastRunTurn("run")).toMatchObject({ turn: 2, spend: { turn: 2 } });
+  });
+});
+
 describe("trusted run-bound edits", () => {
   it("advances cursor through two own edits without changing provenance and replays old edits after completion/head change", () => {
     const store = storeAt();

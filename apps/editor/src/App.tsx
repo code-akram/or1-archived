@@ -1,14 +1,41 @@
 import type { Brief, Scorecard } from "@or1/core";
 import type { PlanReview } from "@or1/tools";
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { comparisonBounds, openingSegment, ringsPath } from "./plan.ts";
+import { PlanSvg } from "./PlanSvg.tsx";
+import { comparisonBounds } from "./plan.ts";
 import { ReviewSession } from "./review-session.ts";
+import { Studio } from "./Studio.tsx";
+import { StudioSession } from "./studio-session.ts";
 import "./style.css";
 
 export function App() {
   const [session] = useState(() => new ReviewSession());
+  // One credential in page memory: the studio reads the review session's token on every call.
+  const [studio] = useState(() => new StudioSession(() => session.getSnapshot().inputs.token));
   const state = useSyncExternalStore(session.subscribe, session.getSnapshot);
   const { inputs, review, acceptance } = state;
+  useEffect(() => {
+    if (state.mode !== "local") return;
+    // `pnpm studio` prints a link with the token in the fragment, which is never sent over HTTP.
+    // Adopt it into memory once and remove it from the address bar and history entry.
+    const token = new URLSearchParams(window.location.hash.slice(1)).get("token");
+    if (!token) return;
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    session.setInputs({ ...session.getSnapshot().inputs, token });
+  }, [session, state.mode]);
+  useEffect(() => {
+    if (state.mode !== "local") return;
+    if (inputs.token.length < 32) {
+      studio.disconnect();
+      return;
+    }
+    const timer = window.setTimeout(() => void studio.connect(), 250);
+    return () => window.clearTimeout(timer);
+  }, [studio, state.mode, inputs.token]);
+  useEffect(() => {
+    if (acceptance?.status === "resolved") void studio.refresh();
+  }, [studio, acceptance]);
+  useEffect(() => () => studio.stopPolling(), [studio]);
   const unresolved = session.unresolved();
   const developmentDemo = state.developmentDemoExpiresAt !== undefined;
   const accessSession = !developmentDemo && state.cloudSession !== undefined;
@@ -55,7 +82,7 @@ export function App() {
                 ? "public development demo"
                 : "read-only cloud pilot"}
           </p>
-          <h1>Compare an option</h1>
+          <h1>{state.mode === "local" ? "Test-fit studio" : "Compare an option"}</h1>
         </div>
         <p>
           {state.mode === "local"
@@ -267,6 +294,20 @@ export function App() {
         )}
       </div>
 
+      {state.mode === "local" && (
+        <Studio
+          studio={studio}
+          onReview={(projectId, ref) => {
+            session.setInputs({ ...session.getSnapshot().inputs, projectId, ref });
+            void session
+              .review()
+              .then(() =>
+                document.getElementById("review")?.scrollIntoView({ behavior: "smooth" }),
+              );
+          }}
+        />
+      )}
+
       {state.mode === "local" && acceptance && (
         <section className={`acceptance ${acceptance.status}`} aria-label="Acceptance request">
           <h2>
@@ -332,7 +373,7 @@ export function App() {
 
       {review && bounds ? (
         <>
-          <section className="review-heading">
+          <section className="review-heading" id="review">
             <h2>{review.brief.name ?? "Project brief"}</h2>
             <dl className="pins">
               <Pin label="Project" value={review.projectId} />
@@ -444,7 +485,6 @@ function PlanCard({
   brief: Brief;
   bounds: ReturnType<typeof comparisonBounds>;
 }) {
-  const labelSize = Math.max(bounds.width, bounds.height) / 40;
   return (
     <article className="plan-card">
       <header>
@@ -457,104 +497,14 @@ function PlanCard({
         <Pin label="Head revision" value={plan.revisionId} />
         <Pin label="Evaluator" value={plan.scorecard.evaluatorVersion} />
       </dl>
-      <svg
-        className="plan"
-        viewBox={`${bounds.x0} ${-(bounds.y0 + bounds.height)} ${bounds.width} ${bounds.height}`}
-        role="img"
-        aria-label={`${title} plan. Positive Y points up; millimetres. Same scale as the other plan.`}
-      >
-        <title>{title} — server-derived plan</title>
-        {plan.model.walls.map((wall) => (
-          <line
-            key={wall.id}
-            x1={wall.start.x}
-            y1={-wall.start.y}
-            x2={wall.end.x}
-            y2={-wall.end.y}
-            stroke="#354448"
-            strokeWidth={wall.thickness}
-          >
-            <title>
-              {wall.id}: {wall.thickness} mm{wall.locked ? ", locked" : ""}
-              {wall.structural ? ", structural" : ""}
-            </title>
-          </line>
-        ))}
-        <path d={ringsPath(plan.derived.slab.outline)} fill="#354448" fillRule="evenodd" />
-        {plan.derived.spaces.map((space, i) => (
-          <path
-            key={space.id}
-            d={ringsPath(space.clear)}
-            fill={i % 2 ? "#dcece4" : "#e7e8f0"}
-            fillRule="evenodd"
-          >
-            <title>
-              {space.id}: {space.label ?? space.program ?? "unlabelled"}; assignment{" "}
-              {space.requirementId ?? "unassigned"}; {(space.netArea / 1e6).toFixed(2)} m² net
-            </title>
-          </path>
-        ))}
-        {plan.model.openings.map((opening) => {
-          const wall = plan.model.walls.find((wall) => wall.id === opening.wall);
-          const segment = wall && openingSegment(wall, opening);
-          if (!wall || !segment) return null;
-          const { start, end, dx, dy } = segment;
-          const hinge = opening.kind === "door" && opening.hinge === "end" ? end : start;
-          const swing = opening.kind === "door" && opening.swing === "right" ? -1 : 1;
-          return (
-            <g key={opening.id}>
-              <title>
-                {opening.id}: {opening.kind}, {opening.width} mm, host {opening.wall}
-              </title>
-              <line
-                x1={start.x}
-                y1={-start.y}
-                x2={end.x}
-                y2={-end.y}
-                stroke="#f8faf9"
-                strokeWidth={wall.thickness + 2}
-              />
-              {opening.kind === "window" ? (
-                <line
-                  x1={start.x}
-                  y1={-start.y}
-                  x2={end.x}
-                  y2={-end.y}
-                  stroke="#007f9e"
-                  strokeWidth={Math.max(25, wall.thickness / 4)}
-                />
-              ) : (
-                <line
-                  x1={hinge.x}
-                  y1={-hinge.y}
-                  x2={hinge.x - dy * swing * opening.width}
-                  y2={-(hinge.y + dx * swing * opening.width)}
-                  stroke="#916222"
-                  strokeWidth={30}
-                />
-              )}
-            </g>
-          );
-        })}
-        {plan.derived.spaces.map((space) => (
-          <text
-            key={space.id}
-            x={space.anchor.x}
-            y={-space.anchor.y}
-            dx={labelSize / 2}
-            dy={-labelSize / 2}
-            fontSize={labelSize}
-            fill="#243237"
-            paintOrder="stroke"
-            stroke="#f8faf9"
-            strokeWidth={labelSize / 8}
-          >
-            {space.id}
-          </text>
-        ))}
-      </svg>
+      <PlanSvg
+        title={`${title} — server-derived plan`}
+        model={plan.model}
+        derived={plan.derived}
+        bounds={bounds}
+      />
       <p className="caption">
-        Same scale · Y ↑ · dimensions in mm · blue windows · ochre door leaves
+        Same scale · Y ↑ · dimensions in mm · blue windows · ochre door leaves · red entrance
       </p>
       <ul className="space-list">
         {plan.derived.spaces.map((space) => (

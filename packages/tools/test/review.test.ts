@@ -195,6 +195,34 @@ describe("review and acceptance authorization", () => {
     expect(read).not.toHaveBeenCalled();
   });
 
+  it("keeps project listings and overviews owner-only and unscoped", async () => {
+    await setup();
+    const listings = [vi.spyOn(store, "listProjects"), vi.spyOn(store, "listRefs")];
+    for (const [extra, code] of [
+      [{ role: "agent" }, "forbidden"],
+      [{ role: "external" }, "forbidden"],
+      [{ scope: { projectId: "p", ref: "option" } }, "forbidden"],
+      [{ runId: "run" }, "invalid_run_binding"],
+    ] as const) {
+      const context = { ...ctx, ...extra };
+      expect(await call("list_projects", {}, context)).toMatchObject({ ok: false, code });
+      expect(await call("project_overview", { projectId: "p" }, context)).toMatchObject({
+        ok: false,
+        code,
+      });
+    }
+    for (const spy of listings) expect(spy).not.toHaveBeenCalled();
+    expect(await call("project_overview", { projectId: "missing" })).toMatchObject({
+      ok: false,
+      code: "project_not_found",
+    });
+    expect(await call("project_overview", { projectId: "p" })).toMatchObject({
+      ok: true,
+      main: { revisionId: state().revisionId },
+      options: [{ ref: "option", stale: false, runs: [] }],
+    });
+  });
+
   it.each(["owner", "external"] as const)(
     "restricts project review capability for %s across every registry tool before store access",
     async (role) => {
@@ -223,6 +251,8 @@ describe("review and acceptance authorization", () => {
         set_brief: { ...envelope, baseBriefVersion: 1, body: { brief } },
         review_option: { projectId: "p", ref: "option" },
         accept_option: accepted,
+        list_projects: {},
+        project_overview: { projectId: "p" },
       };
       const storeAccess = vi.fn((): Store => {
         throw new Error("Restricted calls must not access the store");

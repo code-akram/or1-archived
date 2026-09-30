@@ -1,6 +1,7 @@
-# First persisted agent workflow
+# Persisted agent workflow and studio
 
-This is a **programmatic, single-owning-runner** workflow, not a public run-start API. HTTP offers
+Runs are started by trusted local code only (a programmatic runner, `pnpm eval`, or the owner-only
+local studio), never by a public run-start API. HTTP offers
 `/health`, `/events`, schema-generated `/mcp`, and an explicitly enabled local owner review API;
 there are no unauthenticated database-write or run-start routes. Anonymous MCP clients may list tool
 schemas, but registry data and mutation calls fail closed. An embedding application may pass
@@ -24,12 +25,19 @@ must use that same database to review their options in the default server. This 
 local owner capability over the whole database, not a multi-user or internet deployment. Project/ref
 input is not a credential scope. Startup does not start a pi runner or spend model tokens.
 
-The only owner HTTP tools exposed are:
+The owner HTTP tools exposed are:
 
 | Route | Parameters | Response |
 | --- | --- | --- |
 | `POST /tools/review_option` | `{ projectId, ref }` for an existing option | Coherent main/option models, derived plans, brief, current-main scorecards, and advisory acceptance eligibility |
 | `POST /tools/accept_option` | Registry acceptance envelope with reviewed pins and request ID | New main revision and persisted acceptance receipt, or deterministic rejection |
+| `POST /tools/create_project` | Registry creation envelope with model and brief | New project main, or deterministic rejection |
+| `POST /tools/set_brief` | Registry brief-edit envelope | New brief version, or deterministic rejection |
+| `POST /tools/list_projects` | `{}` | Projects with brief names and option counts |
+| `POST /tools/project_overview` | `{ projectId }` | Main and every option's derived plan, fresh scorecard, staleness and run progress |
+
+A configured studio adds `/studio/status`, `/studio/generate` and `/studio/cancel` (see
+[Local multi-agent studio](#local-multi-agent-studio)).
 
 Both dispatch the shared TypeBox registry definitions; HTTP does not redefine schemas or write SQL.
 Send `Authorization: Bearer <token>` and `Content-Type: application/json`. Credentials in query/body,
@@ -183,8 +191,9 @@ Mode is mandatory. Replay injects the fixture's construction operations through 
 and registry; it is labelled `witness-replay`, with synthetic zero-token accounting. It proves
 feasibility and workflow integration, not independent model quality. Subscription mode reads only
 `shell.json` and `brief.json`, asks the model to inspect/build/score its own option, and is labelled
-`chatgpt-subscription`. It uses the existing runner defaults (60 seconds, 16,384 reported tokens,
-32 tool calls, four rejections); these are admission/accounting limits, not a provider-side quota cap.
+`chatgpt-subscription`. It uses the runner defaults: no wall-clock deadline (Ctrl+C cancels) and the
+runaway guards below; the run ends as soon as the option passes every hard gate. These are
+admission/accounting limits, not a provider-side quota cap.
 There is no automatic acceptance, hosted mutation, retry/resume loop, or paid API-key fallback.
 
 Subscription mode requires an interactive terminal. The operator must explicitly authorize ChatGPT
@@ -215,6 +224,32 @@ Opening the database and reloading the run/turns is supported; constructing anot
 automatically resuming the prior run is not. Neither this command nor local review changes the
 public read-only Cloudflare pilot.
 
+## Local multi-agent studio
+
+`pnpm studio` (see the root README) runs `src/studio-main.ts`: explicit interactive ChatGPT login
+(skipped with `--offline`), one store at `OR1_DATA_DIR/or1.sqlite`, and the loopback owner HTTP
+server with the built editor served same-origin. The owner token is `OR1_OWNER_TOKEN` or a fresh
+random value, printed once inside the `#token=` fragment of the studio link.
+
+`createStudio({ store, owner, agent })` in `src/studio.ts` owns every agent run on its store. It
+interrupts unfinished runs **once** on construction, then each `generate({ projectId, count, note?,
+strategies? })` (1–8 agents) forks `option-N` refs from current main through the registry's
+`fork_ref` with the owner context and starts one scoped runner per ref (`recover: false`) with its
+own credential namespace `studio-agent:<project>:<ref>`. Runs execute concurrently; `generate`
+returns as soon as their records exist. Each agent receives the shared test-fit instruction, one
+design direction from `STRATEGIES` (persisted as the run's `strategySeed`; later batches continue
+the rotation), and the owner's optional note. Agents cannot see each other; distinct directions are
+what make options differ. `cancel({ runId })` aborts one run, `close()` aborts all and waits.
+
+With a studio configured, owner HTTP adds `POST /studio/status`, `/studio/generate` and
+`/studio/cancel`, and the registry tools `create_project`, `set_brief`, `list_projects` and
+`project_overview` next to review/accept. All require the owner bearer and local Host/Origin checks.
+`project_overview` returns main and every option's derived plan with a fresh scorecard, staleness,
+and each run's status, outcome, strategy, pinned validity and latest cumulative spend. `fork_ref`,
+`apply_changes` and run starts other than `/studio/generate` are not HTTP routes. With `editorRoot`,
+the server also serves the built editor for `GET`/`HEAD` (regular files inside the directory only,
+SPA fallback, `/api/*` routed to the API and never to static files).
+
 ## Execution and outcome contract
 
 - One pi `Agent` on one scoped option ref. Only `inspect_project`, `apply_changes`, and `scorecard`
@@ -234,31 +269,43 @@ public read-only Cloudflare pilot.
   A same-ID retry in the active run uses the **original payload**, including original pins, not the
   latest ref head. Changed operations under that ID are rejected. Store idempotency prevents duplicate
   commits. Model-facing tool failures set `isError`; programmatic details are never `undefined`.
-- A fresh final registry/core scorecard must have `valid: true` before `options` can be finalized.
-  Its exact revision, brief, baseline, evaluator version and result are atomically saved with the
-  outcome. Earlier scores and model claims cannot be relabeled as scores of a later revision.
-  External option/main/brief writes make the run stale; such runs fail rather than claim an outcome.
-- Otherwise the outcome is `not_found_within_budget`. User cancellation records `cancelled`, with no
-  success outcome. Timeout/budget stops never admit subsequent geometry commits, including late calls
-  from an injected stream that ignores abort. Partial revisions remain on the option, never implicitly
-  on main. There is **no automatic resume** after restart: an intent/commit/result gap is left for
-  inspection, with its committed revision retained and its running record interrupted.
+- Every successful `apply_changes` result ends with a compact, same-tick fresh hard-gate summary of
+  the new head (failing gates and their first findings), saving the model a scorecard round trip.
+- With `finishOnValid` (default true), the run ends after the turn in which the committed head
+  freshly passes every hard gate, from that summary or the model's own `scorecard` call at the
+  current cursor. The model's closing message is neither requested nor awaited.
+- Finalization is synchronous: the runner scores the exact run cursor with the shared core scorecard
+  and closes the store's run gate in the same tick. `options` requires that fresh score to be
+  `valid: true`; its exact revision, brief, baseline, evaluator version and result are atomically
+  saved with the outcome. Earlier scores and model claims cannot be relabeled as scores of a later
+  revision. External option/main/brief writes make the run stale; such runs fail rather than claim
+  an outcome.
+- A normal end, a provider error, or a **budget stop** (timeout, token, tool-call, rejection or
+  transcript limit) keeps a freshly valid head as `options`; a budget stop never discards a found
+  option. Otherwise the outcome is `not_found_within_budget`. User cancellation records `cancelled`
+  with no success outcome, and other workflow faults do not claim one. Stops never admit subsequent
+  geometry commits, including late calls from an injected stream that ignores abort. Partial
+  revisions remain on the option, never implicitly on main. There is **no automatic resume** after
+  restart: an intent/commit/result gap is left for inspection, with its committed revision retained
+  and its running record interrupted.
 
 ## Budgets and accounting
 
-Defaults: 16,384 reported tokens, 60,000 ms, 32 tool calls, 4 rejected calls, and 262,144 persisted
-UTF-8 transcript bytes. Hard maxima: 100,000 tokens, 300,000 ms, 128 tool calls, 32 rejections, and
-1,048,576 transcript bytes. All values must be positive safe integers; transcript budget must be at
-least 4,096 bytes. A turn's combined transcript/result/spend is at most 65,536 UTF-8 bytes, matching
+Budgets are runaway guards, not quality limits. Defaults: **no wall-clock deadline**
+(`maxDurationMs: null`), 2,000,000 reported tokens, 128 tool calls, 16 rejected calls, and 8,388,608
+persisted UTF-8 transcript bytes. Hard maxima: 50,000,000 tokens, 86,400,000 ms when a deadline is
+set, 1,024 tool calls, 128 rejections, and 67,108,864 transcript bytes. Values must be positive safe
+integers (or `null` for the deadline); transcript budget must be at least 4,096 bytes. A turn's combined transcript/result/spend is at most 65,536 UTF-8 bytes, matching
 the store cap. Space is reserved for the final settlement accounting record. Oversized messages are
 not silently truncated into executable tool requests. Ledger accounting is conservatively byte-sized.
 
-`maxDurationMs` is an admission/cooperative deadline, not synchronous preemption. A core/store
+An explicit `maxDurationMs` is an admission/cooperative deadline, not synchronous preemption. A core/store
 transaction admitted before the deadline can finish afterward, bounded by the synchronous resource
 envelope; elapsed-time checks and timeout stop subsequent admissions. This does not promise hard
 wall-clock transaction rollback. Cancellation likewise cannot undo an already committed revision.
 
-Provider calls receive remaining output-token allowance, remaining timeout, and `maxRetries: 0`.
+Provider calls receive the remaining token allowance capped at the selected model's own `maxTokens`,
+the remaining time only when a deadline is set, and `maxRetries: 0`.
 Reported input/output/cache token usage is accounted before exposing tools from the completed message.
 Rejections (including schema errors and unknown tools) consume retry budget. Turns persist cumulative
 tokens, attempted tool calls, rejections, transcript bytes, elapsed time, and `usageComplete`. Attempts
@@ -293,5 +340,8 @@ quality-ranking, diversity, or exhaustive-search claim is made.
 pi `Agent` with injected `AssistantMessageEventStream`s, the real registry, core, and SQLite store.
 No external model calls or API keys are required. Tests cover a disk-reloaded feasible result,
 requirement non-double-counting, atomic/protected rejection, replay, stale pins, resource budgets,
-UTF-8 limits, cancellation/deadlines (including late noncooperative responses), crash gaps, and the
-independent area-envelope proof and its boundary. Run the root checks/full suite during integration.
+UTF-8 limits, cancellation/deadlines (including late noncooperative responses and a deadline that
+expires after a valid commit), the absent default deadline, per-commit gate summaries and early
+finish, crash gaps, and the independent area-envelope proof and its boundary. `test/studio.test.ts`
+proves studio agents run concurrently (a barrier releases only when all have started), each with a
+distinct direction, and covers owner HTTP routing, static serving and traversal rejection. Run the root checks/full suite during integration.

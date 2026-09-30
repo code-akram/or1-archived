@@ -8,6 +8,7 @@
     "dev": "node --watch src/main.ts",
     "start": "node src/main.ts",
     "eval": "node src/eval-main.ts",
+    "studio": "node src/studio-main.ts",
     "typecheck": "tsc -p .",
     "test": "vitest run"
   },

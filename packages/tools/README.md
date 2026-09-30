@@ -25,8 +25,8 @@ but absent credentials return `unauthorized` and an absent store returns
 tool definitions (including anonymous MCP `tools/list`) needs no execution context.
 Namespace, role, scope, run ID and review capability are never tool parameters. Unknown parameters
 are rejected. Scope is enforced before store access/replay; forks must satisfy it
-for both the target and source ref. Ordinary `review_option` and `accept_option`
-require an owner credential, reject **any** scope (they touch both main and the option), and
+for both the target and source ref. Ordinary `review_option`, `accept_option`,
+`list_projects` and `project_overview` require an owner credential, reject **any** scope (they touch both main and the option), and
 reject trusted run bindings as `invalid_run_binding`, all before store access or
 cached replay. Nonowners and scoped credentials receive `forbidden`.
 
@@ -95,6 +95,13 @@ versions are nonnegative safe integers, distinct from JSON `schemaVersion`.
 | `set_brief` | `{ brief }` | Owner only; pins target head and project-wide brief content version. |
 | `apply_changes` | `{ ops, briefVersion, baselineRevisionId }` | Main is owner-only (store-enforced before replay); options pass credential role to core policy. Requires both context pins, including null baseline on main. |
 | `accept_option` | `{ sourceRef, sourceRevisionId, briefVersion, baselineRevisionId, evaluatorVersion }` | Owner only, ref `main`, nonnull baseRevision, no scope/run binding; exact pinned snapshot acceptance. |
+
+Owner reads for navigation: `list_projects` takes `{}` and returns project IDs, creation times,
+brief names and option counts. `project_overview` takes `{ projectId }` and returns main and every
+option ref with a derived plan, a fresh scorecard against the current brief and the option's own
+baseline, `stale` (baseline no longer main), and a summary of each agent run (status, outcome,
+strategy seed, pinned validity, latest cumulative spend and ledger event). Neither grants access
+by itself. `scoreState(state)` is the synchronous scorer both `scorecard` and the run workflow use.
 
 Mutation `data` is the store command outcome: `{ ok: true, revisionId,
 briefVersion, effects }` or a rejection. Stale geometry, brief and baseline pins

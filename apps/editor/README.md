@@ -1,4 +1,4 @@
-# Editor review
+# Editor
 
 The editor preserves the plan comparison, actual server scorecards and concept-design notice in
 both modes. It discovers its mode with `GET /api/session` before presenting connection controls.
@@ -55,6 +55,25 @@ token field. Do not use client environment variables, URLs or repository files f
 The local token is memory-only; local tool requests use a Bearer header and `credentials: "omit"`.
 The existing exact acceptance intent, uncertain-response warning and same-token retry semantics
 remain unchanged. Never close or reload a page with an unresolved local acceptance.
+
+## Local studio
+
+In local mode the page is the **test-fit studio** (served by `pnpm studio`, or through the Vite
+proxy against a studio server). A studio link's `#token=` fragment is adopted into the same
+memory-only token field and removed from the address bar; the fragment is never sent over HTTP.
+The studio controller reads that single token on every call, so clearing it stops polling.
+
+- **Composer:** presets (the first two reproduce the public eval fixtures exactly) or a rectangular
+  shell (width, depth, wall thickness, entrance door, windows; offsets measured from the west/south
+  end of each wall) and a room brief (ID, programme, quantity, minimum/target area, daylight, doors
+  to other rooms). `src/draft.ts` compiles both through core `applyChanges` and `validateBrief`, so
+  the live preview and error messages are the core's own; the page never invents geometry rules.
+  Creation calls the registry's `create_project`.
+- **Board:** main and every option at one shared scale with fresh scorecards and each agent run's
+  live status, direction and spend, polled every 1.5 s only while a run is queued or running.
+  **Generate** starts N parallel agents; **Cancel run** aborts one. **Review & accept** appears only
+  for a settled, current, valid option and opens the existing review and exact-pin acceptance flow
+  below; afterwards the board shows the new main and the siblings as stale.
 
 ## Checks
 

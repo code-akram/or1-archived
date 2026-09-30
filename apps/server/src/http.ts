@@ -1,14 +1,44 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { extname, join, resolve, sep } from "node:path";
 import type { NodeIncomingMessageLike } from "@modelcontextprotocol/node";
 import { MAX_TOOL_INPUT_BYTES, tools } from "@or1/tools";
 import { isLoopbackHost, type LocalOwner, validateOwner } from "./auth.ts";
 import { createMcpNodeHandler } from "./mcp.ts";
+import type { Studio } from "./studio.ts";
 
 export type HttpOptions = {
   owner?: LocalOwner;
   /** Explicit browser allowlist override; only canonical HTTP loopback origins are permitted. */
   allowedOrigins?: readonly string[];
+  /** Owner-only agent orchestration on the owner's store. Requires owner credentials. */
+  studio?: Studio;
+  /**
+   * Built editor directory served same-origin at `/`, with its `/api/*` calls routed to the API.
+   * Static files are public build output and carry no credentials or project data.
+   */
+  editorRoot?: string;
+};
+
+/** Registry tools reachable with the local owner credential over HTTP. */
+const OWNER_HTTP_TOOLS = new Set([
+  "review_option",
+  "accept_option",
+  "create_project",
+  "set_brief",
+  "list_projects",
+  "project_overview",
+]);
+const CONTENT_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".json": "application/json",
+  ".woff2": "font/woff2",
 };
 
 class TransportError extends Error {
@@ -114,8 +144,46 @@ export function createHttpServer(options: HttpOptions = {}): Server {
     }
   }
   const credential = owner ? createHash("sha256").update(owner.token).digest() : undefined;
+  const studio = options.studio;
+  if (studio && !owner) throw new Error("Studio routes require owner credentials");
+  const editorRoot =
+    options.editorRoot === undefined ? undefined : realpathSync(options.editorRoot);
+  /** Serves only regular files inside the build directory; unknown routes fall back to the SPA. */
+  function serveEditor(req: IncomingMessage, res: ServerResponse, pathname: string): boolean {
+    if (!editorRoot) return false;
+    try {
+      checkLocalRequest(req, origins);
+      let path = resolve(editorRoot, `.${decodeURIComponent(pathname)}`);
+      if (path !== editorRoot && !path.startsWith(`${editorRoot}${sep}`)) return false;
+      if (!statSync(path, { throwIfNoEntry: false })?.isFile()) {
+        if (extname(pathname)) return false;
+        path = join(editorRoot, "index.html");
+      }
+      const real = realpathSync(path);
+      if (!real.startsWith(`${editorRoot}${sep}`)) return false;
+      const body = readFileSync(real);
+      res.writeHead(200, {
+        "content-type": CONTENT_TYPES[extname(real)] ?? "application/octet-stream",
+        "cache-control": real.endsWith("index.html") ? "no-store" : "public, max-age=3600",
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "no-referrer",
+      });
+      res.end(req.method === "HEAD" ? undefined : body);
+      return true;
+    } catch (error) {
+      if (error instanceof TransportError) {
+        json(res, error.status, { error: error.message });
+        return true;
+      }
+      return false;
+    }
+  }
   const mcp = createMcpNodeHandler();
-  async function ownerTool(req: IncomingMessage, res: ServerResponse, name: string) {
+  async function ownerRoute(
+    req: IncomingMessage,
+    res: ServerResponse,
+    handle: (params: unknown) => Promise<unknown> | unknown,
+  ) {
     try {
       const authorization = header(req, "authorization");
       const match = /^Bearer ([A-Za-z0-9._~+/-]+={0,2})$/i.exec(authorization ?? "");
@@ -136,9 +204,7 @@ export function createHttpServer(options: HttpOptions = {}): Server {
       if (length !== undefined && Number(length) > MAX_TOOL_INPUT_BYTES)
         throw new TransportError(413, "body_too_large");
       const params = await readJson(req);
-      const tool = tools.find((tool) => tool.name === name);
-      if (!tool || !owner) throw new TransportError(503, "tool_unavailable");
-      json(res, 200, (await tool.execute(params, owner.context)).data);
+      json(res, 200, await handle(params));
     } catch (error) {
       if (!res.destroyed && !res.headersSent)
         json(res, error instanceof TransportError ? error.status : 500, {
@@ -152,9 +218,29 @@ export function createHttpServer(options: HttpOptions = {}): Server {
       json(res, 400, { error: "invalid_url" });
       return;
     }
-    const pathname = req.url.split("?", 1)[0];
-    if (owner && pathname && ["/tools/review_option", "/tools/accept_option"].includes(pathname)) {
-      void ownerTool(req, res, pathname.slice("/tools/".length));
+    let pathname = req.url.split("?", 1)[0] ?? "/";
+    // The same-origin editor addresses the API under /api, like the Vite development proxy.
+    const api = pathname === "/api" || pathname.startsWith("/api/");
+    if (editorRoot && api) pathname = pathname.slice("/api".length) || "/";
+    const toolName = pathname.startsWith("/tools/") ? pathname.slice("/tools/".length) : undefined;
+    if (owner && toolName && OWNER_HTTP_TOOLS.has(toolName)) {
+      const tool = tools.find((tool) => tool.name === toolName);
+      void ownerRoute(req, res, async (params) => {
+        if (!tool) throw new TransportError(503, "tool_unavailable");
+        return (await tool.execute(params, owner.context)).data;
+      });
+      return;
+    }
+    if (owner && studio && pathname === "/studio/status") {
+      void ownerRoute(req, res, () => studio.status());
+      return;
+    }
+    if (owner && studio && pathname === "/studio/generate") {
+      void ownerRoute(req, res, (params) => studio.generate(params));
+      return;
+    }
+    if (owner && studio && pathname === "/studio/cancel") {
+      void ownerRoute(req, res, (params) => studio.cancel(params));
       return;
     }
     if (pathname === "/health") {
@@ -177,6 +263,14 @@ export function createHttpServer(options: HttpOptions = {}): Server {
       });
       return;
     }
+    // API misses stay JSON 404s (the editor detects local mode from GET /api/session).
+    if (
+      editorRoot &&
+      !api &&
+      (req.method === "GET" || req.method === "HEAD") &&
+      serveEditor(req, res, pathname)
+    )
+      return;
     json(res, 404, { error: "not_found" });
   });
   server.requestTimeout = 15_000;

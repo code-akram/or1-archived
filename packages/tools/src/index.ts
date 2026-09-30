@@ -21,11 +21,20 @@ import type {
   Evaluation,
   RefState,
   Rejection,
+  RunRecord,
 } from "@or1/store/portable";
 import { MAX_ACCEPTANCE_RECEIPT_BYTES } from "@or1/store/portable";
 import { type TSchema, Type } from "typebox";
 import { defineTool, result, type ToolContext, type ToolDefinition } from "./registry.ts";
-import type { AcceptanceReceipt, PlanReview, ReviewOptionSuccess } from "./review.ts";
+import type {
+  AcceptanceReceipt,
+  PlanReview,
+  ProjectListing,
+  ProjectOverview,
+  RefOverview,
+  ReviewOptionSuccess,
+  RunSummary,
+} from "./review.ts";
 
 export type { ToolContext, ToolDefinition, ToolResult } from "./registry.ts";
 export { defineTool, MAX_TOOL_INPUT_BYTES } from "./registry.ts";
@@ -35,10 +44,19 @@ export type {
   AcceptOptionResult,
   AcceptOptionSuccess,
   CloudSession,
+  GenerateInput,
+  GenerateResult,
   PlanReview,
+  ProjectListing,
+  ProjectOverview,
+  ProjectOverviewResult,
+  RefOverview,
   ReviewOptionInput,
   ReviewOptionResult,
   ReviewOptionSuccess,
+  RunSummary,
+  Strategy,
+  StudioStatus,
 } from "./review.ts";
 
 const strict = <P extends Record<string, TSchema>>(properties: P) =>
@@ -141,6 +159,121 @@ function acceptanceEligibility(
   return { allowed: true };
 }
 
+/** Server-derived plan of one head, scored against the given brief and baseline. */
+function planReview(
+  state: RefState,
+  candidate: Model,
+  brief: ReturnType<typeof current>["brief"],
+  base: Model,
+): PlanReview {
+  const { spaces, openings, adjacencies, slab, problems } = derive(candidate);
+  return {
+    revisionId: state.revisionId,
+    model: candidate,
+    derived: { spaces, openings, adjacencies, slab, problems },
+    scorecard: scorecard(candidate, brief, base),
+  };
+}
+
+function runSummary(ctx: ToolContext, run: RunRecord): RunSummary {
+  const last = ctx.store?.readLastRunTurn(run.id);
+  const transcript = (last?.transcript ?? null) as {
+    kind?: unknown;
+    name?: unknown;
+    reason?: unknown;
+  } | null;
+  const valid = (run.evaluation?.result as { valid?: unknown } | undefined)?.valid;
+  return {
+    id: run.id,
+    status: run.status,
+    outcome: run.outcome,
+    strategySeed: run.strategySeed,
+    retryCount: run.retryCount,
+    valid: typeof valid === "boolean" ? valid : null,
+    spend: (last?.spend ?? null) as RunSummary["spend"],
+    lastEvent:
+      transcript && typeof transcript.kind === "string"
+        ? {
+            kind: transcript.kind,
+            ...(typeof transcript.name === "string" ? { name: transcript.name } : {}),
+            ...(typeof transcript.reason === "string" || transcript.reason === null
+              ? { reason: transcript.reason as string | null }
+              : {}),
+          }
+        : null,
+  };
+}
+
+export const listProjects = defineTool({
+  name: "list_projects",
+  description: "Owner-only list of projects with their brief names and option counts.",
+  parameters: strict({}),
+  mutates: false,
+  async execute(_params, ctx) {
+    const store = ctx.store;
+    if (!store) return result({ ok: false, code: "store_unavailable" });
+    const listing: ProjectListing = {
+      ok: true,
+      projects: store.listProjects().map((project) => {
+        const brief = store.readState(project.projectId, "main")?.brief.body as
+          | { name?: unknown }
+          | null
+          | undefined;
+        return {
+          ...project,
+          name: typeof brief?.name === "string" ? brief.name : null,
+          options: store.listRefs(project.projectId).filter((ref) => ref.ref !== "main").length,
+        };
+      }),
+    };
+    return result(listing);
+  },
+});
+
+export const projectOverview = defineTool({
+  name: "project_overview",
+  description:
+    "Owner-only overview of main and every option ref: derived plans, fresh scorecards and agent run progress.",
+  parameters: strict({ projectId: identifier }),
+  mutates: false,
+  async execute(params, ctx) {
+    const store = ctx.store;
+    if (!store) return result({ ok: false, code: "store_unavailable" });
+    const mainState = store.readState(params.projectId, "main");
+    if (!mainState) return result({ ok: false, code: "project_not_found" });
+    const main = current(mainState);
+    const runs = store.listRuns(params.projectId);
+    const options = store
+      .listRefs(params.projectId)
+      .filter((ref) => ref.ref !== "main")
+      .flatMap((ref): RefOverview[] => {
+        const state = store.readState(params.projectId, ref.ref);
+        if (!state) return [];
+        const candidate = current(state);
+        const base = state.forkBase ? model(state.forkBase.model) : candidate.model;
+        return [
+          {
+            ref: ref.ref,
+            forkBaseRevisionId: ref.forkBaseRevisionId,
+            stale: ref.forkBaseRevisionId !== mainState.revisionId,
+            // Same fresh evaluation an option review would show: current brief, own baseline.
+            plan: planReview(state, candidate.model, main.brief, base),
+            runs: runs.filter((run) => run.ref === ref.ref).map((run) => runSummary(ctx, run)),
+          },
+        ];
+      });
+    const overview: ProjectOverview = {
+      ok: true,
+      projectId: params.projectId,
+      briefVersion: mainState.brief.version,
+      brief: main.brief,
+      main: planReview(mainState, main.model, main.brief, main.model),
+      options,
+    };
+    return result(overview);
+  },
+});
+
 export const reviewOption = defineTool({
   name: "review_option",
   description:
@@ -160,17 +293,8 @@ export const reviewOption = defineTool({
     if (!source.forkBase) return result({ ok: false, code: "stale_baseline" });
     // Validate persisted baseline data, but never use its historical score as acceptance evidence.
     model(source.forkBase.model);
-    const plan = (state: RefState, candidate: Model): PlanReview => {
-      const { spaces, openings, adjacencies, slab, problems } = derive(candidate);
-      return {
-        revisionId: state.revisionId,
-        model: candidate,
-        derived: { spaces, openings, adjacencies, slab, problems },
-        scorecard: scorecard(candidate, baseline.brief, baseline.model),
-      };
-    };
-    const mainReview = plan(main, baseline.model);
-    const option = plan(source, candidate.model);
+    const mainReview = planReview(main, baseline.model, baseline.brief, baseline.model);
+    const option = planReview(source, candidate.model, baseline.brief, baseline.model);
     const review: ReviewOptionSuccess = {
       ok: true,
       projectId: params.projectId,
@@ -273,6 +397,24 @@ export const inspectProject = defineTool({
   },
 });
 
+/**
+ * Synchronous fresh score of one persisted ref head, pinned to exactly the state it read. Shared by
+ * the scorecard tool and trusted workflow code that must score without yielding to the event loop.
+ */
+export function scoreState(state: RefState) {
+  const candidate = current(state);
+  const base = state.forkBase ? model(state.forkBase.model) : candidate.model;
+  const evaluation = scorecard(candidate.model, candidate.brief, base);
+  return {
+    ok: true as const,
+    revisionId: state.revisionId,
+    briefVersion: state.brief.version,
+    baselineRevisionId: state.forkBase?.revisionId ?? null,
+    evaluatorVersion: evaluation.evaluatorVersion,
+    result: evaluation,
+  };
+}
+
 export const scorecardTool = defineTool({
   name: "scorecard",
   description: "Evaluate the current option against the current brief and immutable fork baseline.",
@@ -281,17 +423,7 @@ export const scorecardTool = defineTool({
   async execute(params, ctx) {
     const state = ctx.store?.readState(params.projectId, params.ref ?? "main");
     if (!state) return result({ ok: false, code: "ref_not_found" });
-    const candidate = current(state);
-    const base = state.forkBase ? model(state.forkBase.model) : candidate.model;
-    const evaluation = scorecard(candidate.model, candidate.brief, base);
-    return result({
-      ok: true,
-      revisionId: state.revisionId,
-      briefVersion: state.brief.version,
-      baselineRevisionId: state.forkBase?.revisionId ?? null,
-      evaluatorVersion: evaluation.evaluatorVersion,
-      result: evaluation,
-    });
+    return result(scoreState(state));
   },
 });
 
@@ -429,4 +561,6 @@ export const tools: readonly ToolDefinition[] = [
   setBrief,
   reviewOption,
   acceptOption,
+  listProjects,
+  projectOverview,
 ];

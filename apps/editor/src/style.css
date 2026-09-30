@@ -410,3 +410,287 @@ pre {
     width: 100%;
   }
 }
+
+/* Studio: compose a project, generate options with parallel agents, pick one to review. */
+.studio {
+  margin: 24px 0;
+  padding: 20px;
+  background: #fff;
+  border: 1px solid #d5ddd7;
+  border-radius: 8px;
+}
+.studio.empty {
+  max-width: none;
+  padding: 28px 24px;
+}
+.studio-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.studio-header h2 {
+  margin-bottom: 4px;
+}
+.agent {
+  margin: 0;
+  font-size: 13px;
+  color: #53656a;
+}
+.agent.on::before,
+.agent.off::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 8px;
+  background: #2f8a5b;
+}
+.agent.off::before {
+  background: #aa7524;
+}
+.studio-projects {
+  display: flex;
+  gap: 12px;
+  align-items: end;
+}
+.studio-projects label {
+  min-width: 280px;
+}
+.presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 16px;
+  font-size: 13px;
+  color: #53656a;
+}
+.composer-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(280px, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+.composer-preview {
+  position: sticky;
+  top: 16px;
+}
+.composer-preview h3 {
+  margin-top: 0;
+}
+.composer-preview > button {
+  width: 100%;
+}
+fieldset {
+  border: 1px solid #e1e7e2;
+  border-radius: 6px;
+  padding: 16px;
+  margin: 0 0 16px;
+  display: grid;
+  gap: 12px;
+}
+legend {
+  font-weight: 700;
+  font-size: 14px;
+  padding: 0 6px;
+}
+.row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+.opening-row {
+  grid-template-columns: 110px repeat(3, minmax(0, 1fr)) 42px;
+}
+.row-label {
+  font-size: 13px;
+  font-weight: 600;
+  padding-bottom: 12px;
+}
+.wide {
+  grid-column: 1 / -1;
+}
+.hint {
+  margin: 0;
+  font-size: 12px;
+  color: #53656a;
+}
+button.small {
+  min-height: 34px;
+  padding: 6px 12px;
+  font-size: 13px;
+}
+fieldset > button.small {
+  justify-self: start;
+}
+table.rooms td {
+  padding: 6px 4px;
+  vertical-align: middle;
+}
+table.rooms input:not([type="checkbox"]) {
+  height: 34px;
+  padding: 6px 8px;
+  min-width: 70px;
+}
+table.rooms input[type="checkbox"],
+.chip input {
+  width: auto;
+  height: auto;
+}
+.doors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 160px;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border: 1px solid #c7d3cb;
+  border-radius: 999px;
+  background: #f8faf9;
+}
+.chip.static {
+  margin-right: 4px;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+.brief-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin-bottom: 16px;
+  font-size: 14px;
+}
+.brief-line code {
+  color: #53656a;
+  font-size: 12px;
+}
+.generate {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr) auto;
+  gap: 12px 16px;
+  align-items: end;
+  padding: 16px;
+  background: #f5f8f5;
+  border: 1px solid #e1e7e2;
+  border-radius: 6px;
+  margin-bottom: 20px;
+}
+.generate .hint {
+  grid-column: 1 / -1;
+}
+.options-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 16px;
+}
+.option-card {
+  border: 1px solid #d5ddd7;
+  border-radius: 8px;
+  padding: 14px;
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  background: #fff;
+}
+.option-card.live {
+  border-color: #007f9e;
+  box-shadow: 0 0 0 2px #cfe9f0;
+}
+.option-card > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: start;
+}
+.option-card h3 {
+  margin: 0;
+  font-size: 15px;
+}
+.plan.thumb {
+  aspect-ratio: 4 / 3;
+}
+.run-line {
+  margin: 0;
+  font-size: 12px;
+  color: #53656a;
+}
+.run-status {
+  font-weight: 700;
+  color: #243237;
+}
+.run-line.running .run-status::after,
+.run-line.queued .run-status::after {
+  content: " …";
+  animation: pulse 1.2s ease-in-out infinite;
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.2;
+  }
+}
+.failing {
+  color: #8f3024;
+}
+.mini-scores {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 11px;
+  color: #53656a;
+}
+.card-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+@media (max-width: 1000px) {
+  .composer-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .composer-preview {
+    position: static;
+  }
+}
+@media (max-width: 680px) {
+  .studio {
+    padding: 16px;
+  }
+  .studio-projects {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .studio-projects label {
+    min-width: 0;
+    flex: 1;
+  }
+  .row,
+  .opening-row,
+  .generate {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .row-label {
+    grid-column: 1 / -1;
+    padding: 0;
+  }
+}

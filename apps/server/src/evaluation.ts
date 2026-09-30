@@ -26,7 +26,7 @@ import {
   reviewOption,
   type ToolContext,
 } from "@or1/tools";
-import { createRunRunner, type RunBudget } from "./runs.ts";
+import { createRunRunner, type RunBudget, TEST_FIT_INSTRUCTION } from "./runs.ts";
 
 const repository = fileURLToPath(new URL("../../../", import.meta.url));
 export type EvalFixture = { name: string; shell: Model; brief: Brief };
@@ -162,12 +162,7 @@ export async function evaluateFixture(options: {
     const run = await runner.start({
       id,
       instruction:
-        "Produce one test-fit for the current shell and brief. Inspect the project first. " +
-        "Keep all construction inside the existing exterior shell and preserve locked geometry/openings. " +
-        "Use orthogonal walls and integer millimetres. Build partitions and connecting doors, then assign " +
-        "every required room explicitly. You may tag using an interior point after constructing final geometry. " +
-        "Read the scorecard and correct failed gates within the budget. Do not accept or edit main. " +
-        "A failed search is not proof of infeasibility. " +
+        `${TEST_FIT_INSTRUCTION} ` +
         (options.mode === "witness-replay"
           ? "This is a disclosed deterministic witness replay, not independent model quality evidence."
           : "No witness solution is supplied."),
