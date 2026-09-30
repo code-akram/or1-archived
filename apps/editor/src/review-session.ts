@@ -1,6 +1,7 @@
 import type {
   AcceptOptionInput,
   AcceptOptionResult,
+  CloudSession,
   ReviewOptionInput,
   ReviewOptionResult,
   ReviewOptionSuccess,
@@ -13,6 +14,9 @@ type Acceptance =
   | { status: "uncertain"; intent: Intent }
   | { status: "resolved"; intent: Intent; result: AcceptOptionResult };
 export type ReviewState = {
+  mode: "loading" | "local" | "cloud" | "blocked";
+  cloudSession: CloudSession | undefined;
+  refreshing: boolean;
   inputs: Inputs;
   reviewing: boolean;
   accepting: boolean;
@@ -24,6 +28,9 @@ export type ReviewState = {
 /** Memory-only session. Review responses are disposable; mutation intents are not. */
 export class ReviewSession {
   private state: ReviewState = {
+    mode: "loading",
+    cloudSession: undefined,
+    refreshing: false,
     inputs: { projectId: "", ref: "", token: "" },
     reviewing: false,
     accepting: false,
@@ -34,9 +41,15 @@ export class ReviewSession {
   private generation = 0;
   private listeners = new Set<() => void>();
   private fetcher: typeof fetch;
+  private hostname: string;
+  private cloudDetected = false;
 
-  constructor(fetcher: typeof fetch = globalThis.fetch.bind(globalThis)) {
+  constructor(
+    fetcher: typeof fetch = globalThis.fetch.bind(globalThis),
+    hostname = globalThis.location?.hostname ?? "localhost",
+  ) {
     this.fetcher = fetcher;
+    this.hostname = hostname;
   }
 
   getSnapshot = () => this.state;
@@ -49,20 +62,124 @@ export class ReviewSession {
     for (const listener of this.listeners) listener();
   }
 
+  async refreshSession() {
+    if (this.state.refreshing || this.state.mode === "local") return;
+    this.generation++;
+    this.update({
+      mode: "loading",
+      refreshing: true,
+      review: undefined,
+      reviewing: false,
+      message: "",
+      inputs: { ...this.state.inputs, token: "" },
+    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20_000);
+    try {
+      const response = await this.fetcher("/api/session", {
+        credentials: "same-origin",
+        cache: "no-store",
+        redirect: "error",
+        signal: controller.signal,
+      });
+      if (
+        response.status === 404 &&
+        !response.redirected &&
+        !this.cloudDetected &&
+        ["localhost", "127.0.0.1", "[::1]", "::1"].includes(this.hostname)
+      ) {
+        this.update({ mode: "local", cloudSession: undefined });
+        return;
+      }
+      if (!response.ok || response.redirected) throw new Error("Access session unavailable.");
+      const session: unknown = await response.json();
+      if (!isCloudSession(session) || session.expiresAt <= Date.now())
+        throw new Error("Access session malformed or expired.");
+      this.cloudDetected = true;
+      const previous = this.state.cloudSession;
+      const samePrincipal = previous?.principalId === session.principalId;
+      const project =
+        (samePrincipal &&
+          session.projects.find((project) => project.projectId === this.state.inputs.projectId)) ||
+        session.projects[0];
+      this.update({
+        mode: "cloud",
+        cloudSession: session,
+        inputs: {
+          projectId: project?.projectId ?? "",
+          ref:
+            samePrincipal && project?.projectId === this.state.inputs.projectId
+              ? this.state.inputs.ref
+              : (project?.refs.find((ref) => ref !== "main") ?? project?.refs[0] ?? ""),
+          token: "",
+        },
+      });
+    } catch {
+      this.update({
+        mode: "blocked",
+        cloudSession: undefined,
+        inputs: { projectId: "", ref: "", token: "" },
+        message:
+          "Access session unavailable or expired. Use Cloudflare Access login, then refresh the session. If login has expired, reload this page to sign in.",
+      });
+    } finally {
+      clearTimeout(timeout);
+      this.update({ refreshing: false });
+    }
+  }
+
+  expireSession() {
+    if (this.state.mode !== "cloud" || !this.state.cloudSession) return;
+    if (this.state.cloudSession.expiresAt > Date.now()) return;
+    this.generation++;
+    this.update({
+      mode: "blocked",
+      cloudSession: undefined,
+      review: undefined,
+      reviewing: false,
+      message: "Access session expired. Refresh the session or reload this page to sign in.",
+    });
+  }
+
   setInputs(inputs: Inputs) {
+    if (this.state.mode !== "local") {
+      if (this.state.mode !== "cloud") return;
+      const project = this.state.cloudSession?.projects.find(
+        (project) => project.projectId === inputs.projectId,
+      );
+      if (!project) return;
+      inputs = {
+        ...inputs,
+        token: "",
+        ref:
+          inputs.projectId !== this.state.inputs.projectId
+            ? (project.refs.find((ref) => ref !== "main") ?? project.refs[0] ?? "")
+            : inputs.ref,
+      };
+    }
     this.generation++;
     this.update({ inputs, review: undefined, reviewing: false, message: "" });
   }
 
   async review() {
+    this.expireSession();
+    const { mode, cloudSession } = this.state;
+    if (mode !== "local" && mode !== "cloud") return;
     if (this.state.accepting || this.unresolved()) return;
     const { projectId, ref, token } = this.state.inputs;
-    if (!projectId || !ref || !token) return;
+    if (!projectId || !ref || (mode === "local" && !token)) return;
+    if (mode === "cloud" && !cloudSession?.projects.some((p) => p.projectId === projectId)) return;
     const generation = ++this.generation;
     this.update({ reviewing: true, review: undefined, message: "" });
     try {
       const input: ReviewOptionInput = { projectId, ref };
-      const result = await this.post<ReviewOptionResult>("review_option", input, token);
+      const result = await this.post<ReviewOptionResult>(
+        "review_option",
+        input,
+        token,
+        cloudSession?.principalId,
+      );
+      this.expireSession();
       if (generation !== this.generation) return;
       if (result.ok && (result.projectId !== projectId || result.ref !== ref))
         throw new Error("The server returned a different project or ref. Review again.");
@@ -72,8 +189,19 @@ export class ReviewSession {
         message: result.ok ? "" : rejectionMessage(result),
       });
     } catch (error) {
+      this.expireSession();
       if (generation !== this.generation) return;
-      this.update({ reviewing: false, message: errorMessage(error) });
+      if (mode === "cloud" && errorMessage(error) === "Access login required.") {
+        this.generation++;
+        this.update({
+          mode: "blocked",
+          cloudSession: undefined,
+          reviewing: false,
+          message: "Access login required. Reload this page to sign in, then refresh the session.",
+        });
+      } else {
+        this.update({ reviewing: false, message: errorMessage(error) });
+      }
     }
   }
 
@@ -84,6 +212,7 @@ export class ReviewSession {
   }
 
   async accept() {
+    if (this.state.mode !== "local") return;
     const { review, inputs } = this.state;
     if (this.state.accepting || this.unresolved() || !review?.eligibility.allowed || !inputs.token)
       return;
@@ -114,6 +243,7 @@ export class ReviewSession {
   }
 
   async retry() {
+    if (this.state.mode !== "local") return;
     const acceptance = this.state.acceptance;
     const token = this.state.inputs.token;
     if (this.state.accepting || acceptance?.status !== "uncertain" || !token) return;
@@ -175,17 +305,25 @@ export class ReviewSession {
     name: string,
     input: unknown,
     token: string,
+    principalId?: string,
   ): Promise<T> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 20_000);
     try {
       const response = await this.fetcher(`/api/tools/${name}`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        credentials: "omit",
+        headers: principalId
+          ? { "Content-Type": "application/json" }
+          : { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        credentials: principalId ? "same-origin" : "omit",
+        ...(principalId ? { redirect: "error" as const } : {}),
         body: JSON.stringify(input),
         signal: controller.signal,
       });
+      if (principalId && (response.status === 401 || response.redirected))
+        throw new Error("Access login required.");
+      if (principalId && response.headers.get("X-Or1-Principal-Id") !== principalId)
+        throw new Error("Access identity changed or was not verified. Refresh the session.");
       if (response.status >= 500) throw new Error(`Server unavailable (${response.status}).`);
       const result = (await response.json()) as T;
       if (!result || typeof result.ok !== "boolean" || (!response.ok && result.ok))
@@ -195,6 +333,31 @@ export class ReviewSession {
       clearTimeout(timeout);
     }
   }
+}
+
+function isCloudSession(value: unknown): value is CloudSession {
+  if (!value || typeof value !== "object") return false;
+  const session = value as CloudSession;
+  return (
+    session.mode === "cloud" &&
+    typeof session.principalId === "string" &&
+    session.principalId.length > 0 &&
+    typeof session.expiresAt === "number" &&
+    Number.isFinite(session.expiresAt) &&
+    Array.isArray(session.projects) &&
+    session.projects.every(
+      (project) =>
+        project &&
+        typeof project.projectId === "string" &&
+        project.projectId.length > 0 &&
+        typeof project.label === "string" &&
+        (project.membership === "owner" || project.membership === "viewer") &&
+        Array.isArray(project.refs) &&
+        project.refs.every((ref: unknown) => typeof ref === "string" && ref.length > 0) &&
+        project.permissions?.canReview === true &&
+        project.permissions.canAccept === false,
+    )
+  );
 }
 
 async function credentialFingerprint(token: string) {

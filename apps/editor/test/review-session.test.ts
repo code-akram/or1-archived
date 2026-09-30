@@ -5,6 +5,16 @@ import { acceptanceFixture, reviewFixture } from "./fixtures.ts";
 const inputs = { projectId: "synthetic-project", ref: "option-a", token: "synthetic-owner-token" };
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 
+async function localSession(fetcher: typeof fetch = globalThis.fetch.bind(globalThis)) {
+  const session = new ReviewSession(
+    (url, init) =>
+      url === "/api/session" ? Promise.resolve(response({}, 404)) : fetcher(url, init),
+    "localhost",
+  );
+  await session.refreshSession();
+  return session;
+}
+
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
@@ -12,16 +22,19 @@ afterEach(() => {
 
 describe("review session", () => {
   it("binds native browser fetch to the global receiver", async () => {
-    const fetcher = vi.fn<typeof fetch>(function (this: unknown) {
+    const fetcher = vi.fn<typeof fetch>(function (this: unknown, url) {
       if (this !== globalThis) throw new TypeError("Illegal invocation");
-      return Promise.resolve(response(reviewFixture()));
+      return Promise.resolve(
+        url === "/api/session" ? response({}, 404) : response(reviewFixture()),
+      );
     });
     vi.stubGlobal("fetch", fetcher);
     const session = new ReviewSession();
+    await session.refreshSession();
     session.setInputs(inputs);
     await session.review();
     expect(session.getSnapshot().review?.option.revisionId).toBe("option-head-29");
-    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
   it.each(["projectId", "ref", "token"] as const)(
@@ -32,7 +45,7 @@ describe("review session", () => {
         .fn<typeof fetch>()
         .mockReturnValueOnce(old.promise)
         .mockResolvedValueOnce(response(reviewFixture("new-option")));
-      const session = new ReviewSession(fetcher);
+      const session = await localSession(fetcher);
       session.setInputs(inputs);
       const first = session.review();
       session.setInputs({ ...inputs, [field]: "changed" });
@@ -51,7 +64,7 @@ describe("review session", () => {
       .fn<typeof fetch>()
       .mockReturnValueOnce(old.promise)
       .mockResolvedValueOnce(response({ ...reviewFixture(), briefVersion: 8 }));
-    const session = new ReviewSession(fetcher);
+    const session = await localSession(fetcher);
     session.setInputs(inputs);
     const first = session.review();
     await session.review();
@@ -65,7 +78,7 @@ describe("review session", () => {
       .fn<typeof fetch>()
       .mockResolvedValueOnce(response({ ...reviewFixture(), projectId: "other-project" }))
       .mockResolvedValueOnce(response({ ok: false, code: "ref_not_found" }));
-    const session = new ReviewSession(fetcher);
+    const session = await localSession(fetcher);
     session.setInputs(inputs);
     await session.review();
     expect(session.getSnapshot().review).toBeUndefined();
@@ -80,7 +93,7 @@ describe("review session", () => {
       const fetcher = vi
         .fn<typeof fetch>()
         .mockResolvedValue(response({ ...reviewFixture(), eligibility: { allowed: false, code } }));
-      const session = new ReviewSession(fetcher);
+      const session = await localSession(fetcher);
       session.setInputs(inputs);
       await session.review();
       await session.accept();
@@ -101,7 +114,7 @@ describe("review session", () => {
       .mockImplementationOnce((_url, init) =>
         Promise.resolve(response(acceptanceFixture(JSON.parse(init?.body as string)))),
       );
-    const session = new ReviewSession(fetcher);
+    const session = await localSession(fetcher);
     session.setInputs(inputs);
     await session.review();
     const accepting = session.accept();
@@ -161,7 +174,7 @@ describe("review session", () => {
         sent.resolve();
         return pending.promise;
       });
-    const session = new ReviewSession(fetcher);
+    const session = await localSession(fetcher);
     session.setInputs(inputs);
     await session.review();
     const accepting = session.accept();
@@ -203,7 +216,7 @@ describe("review session", () => {
         .mockImplementationOnce((_url, init) =>
           Promise.resolve(response(acceptanceFixture(JSON.parse(init?.body as string)))),
         );
-      const session = new ReviewSession(fetcher);
+      const session = await localSession(fetcher);
       session.setInputs(inputs);
       await session.review();
       vi.useFakeTimers();
@@ -224,7 +237,7 @@ describe("review session", () => {
 
   it("does not send a new intent if inputs change while credentials are being fingerprinted", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response(reviewFixture()));
-    const session = new ReviewSession(fetcher);
+    const session = await localSession(fetcher);
     session.setInputs(inputs);
     await session.review();
     const accepting = session.accept();
@@ -247,7 +260,7 @@ describe("review session", () => {
         }),
       )
       .mockResolvedValueOnce(response({ ok: false, code: "invalid_option" }));
-    const session = new ReviewSession(fetcher);
+    const session = await localSession(fetcher);
     session.setInputs(inputs);
     await session.review();
     await session.accept();

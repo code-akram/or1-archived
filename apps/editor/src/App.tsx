@@ -11,6 +11,26 @@ export function App() {
   const { inputs, review, acceptance } = state;
   const unresolved = session.unresolved();
   useEffect(() => {
+    void session.refreshSession();
+    const refresh = () => {
+      if (document.visibilityState === "visible") void session.refreshSession();
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [session]);
+  useEffect(() => {
+    if (state.mode !== "cloud" || !state.cloudSession) return;
+    const timeout = window.setTimeout(
+      () => session.expireSession(),
+      Math.max(0, Math.min(state.cloudSession.expiresAt - Date.now(), 2_147_483_647)),
+    );
+    return () => window.clearTimeout(timeout);
+  }, [session, state.mode, state.cloudSession]);
+  useEffect(() => {
     if (!unresolved) return;
     const warn = (event: BeforeUnloadEvent) => {
       event.preventDefault();
@@ -25,94 +45,182 @@ export function App() {
     <main>
       <header className="page-header">
         <div>
-          <p className="eyebrow">or1 / local owner review</p>
+          <p className="eyebrow">
+            or1 / {state.mode === "local" ? "local owner review" : "read-only cloud pilot"}
+          </p>
           <h1>Compare an option</h1>
         </div>
-        <p>Review the current heads. Accept only the exact option you reviewed.</p>
+        <p>
+          {state.mode === "local"
+            ? "Review the current heads. Accept only the exact option you reviewed."
+            : "Review the current heads. Acceptance and agent runs are disabled in this pilot."}
+        </p>
       </header>
       <aside className="notice">
         <strong>Concept design only — not code certification.</strong> Gates check the brief and
         geometric consistency; heuristics do not establish regulatory compliance. Owner approval is
         a design decision, not a safety or construction sign-off.
       </aside>
-      <form
-        className="connection"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void session.review();
-        }}
-      >
-        <label>
-          Project ID
-          <input
-            value={inputs.projectId}
-            autoComplete="off"
-            spellCheck={false}
-            onChange={(event) => session.setInputs({ ...inputs, projectId: event.target.value })}
-            required
-          />
-        </label>
-        <label>
-          Candidate ref
-          <input
-            value={inputs.ref}
-            autoComplete="off"
-            spellCheck={false}
-            placeholder="option-a"
-            onChange={(event) => session.setInputs({ ...inputs, ref: event.target.value })}
-            required
-          />
-        </label>
-        <label>
-          Local owner token
-          <input
-            type="password"
-            value={inputs.token}
-            autoComplete="off"
-            spellCheck={false}
-            onChange={(event) => session.setInputs({ ...inputs, token: event.target.value })}
-            required
-          />
-        </label>
-        <button
-          type="submit"
-          disabled={
-            state.reviewing ||
-            state.accepting ||
-            unresolved ||
-            !inputs.projectId ||
-            !inputs.ref ||
-            !inputs.token
-          }
+      {state.mode !== "local" && (
+        <form
+          className="connection cloud-connection"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void session.review();
+          }}
         >
-          {state.reviewing ? "Reviewing…" : "Review option"}
-        </button>
-        <button
-          type="button"
-          className="secondary"
-          disabled={!inputs.token}
-          onClick={() => session.setInputs({ ...inputs, token: "" })}
+          {state.mode === "cloud" && state.cloudSession && (
+            <>
+              <label>
+                Project
+                <select
+                  value={inputs.projectId}
+                  onChange={(event) =>
+                    session.setInputs({ ...inputs, projectId: event.target.value })
+                  }
+                  required
+                >
+                  {!state.cloudSession.projects.length && (
+                    <option value="">No projects assigned</option>
+                  )}
+                  {state.cloudSession.projects.map((project) => (
+                    <option key={project.projectId} value={project.projectId}>
+                      {project.label} · {project.membership}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Candidate ref
+                <input
+                  value={inputs.ref}
+                  list="cloud-refs"
+                  autoComplete="off"
+                  spellCheck={false}
+                  onChange={(event) => session.setInputs({ ...inputs, ref: event.target.value })}
+                  required
+                />
+                <datalist id="cloud-refs">
+                  {state.cloudSession.projects
+                    .find((project) => project.projectId === inputs.projectId)
+                    ?.refs.map((ref) => (
+                      <option key={ref} value={ref} />
+                    ))}
+                </datalist>
+              </label>
+              <button type="submit" disabled={state.reviewing || !inputs.projectId || !inputs.ref}>
+                {state.reviewing ? "Reviewing…" : "Review option"}
+              </button>
+            </>
+          )}
+          <button
+            type="button"
+            className="secondary"
+            disabled={state.refreshing}
+            onClick={() => void session.refreshSession()}
+          >
+            {state.refreshing ? "Checking Access session…" : "Refresh session"}
+          </button>
+          {state.mode === "blocked" && (
+            <button type="button" className="secondary" onClick={() => window.location.reload()}>
+              Reload to sign in
+            </button>
+          )}
+          <p className="setup cloud-status">
+            <strong>Read-only pilot.</strong> Use Cloudflare Access login, not a shared owner token.
+            {state.mode === "cloud" && state.cloudSession && (
+              <>
+                {" "}
+                Session verified · expires{" "}
+                {new Date(state.cloudSession.expiresAt).toLocaleTimeString()}.
+              </>
+            )}
+            {state.mode === "cloud" && !state.cloudSession?.projects.length && (
+              <> Ask the pilot operator to assign a project to your Access identity.</>
+            )}
+          </p>
+        </form>
+      )}
+      {state.mode === "local" && (
+        <form
+          className="connection"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void session.review();
+          }}
         >
-          Clear token
-        </button>
-        <details className="setup">
-          <summary>Local connection and credential setup</summary>
-          <p>
-            Run the local server on 127.0.0.1:4310 and the editor on localhost:5173 or
-            127.0.0.1:5173. Set <code>OR1_OWNER_TOKEN</code> on the server to a strong secret of at
-            least 32 bearer-safe characters, then run <code>pnpm dev:server</code> and{" "}
-            <code>pnpm dev:editor</code>. This configures the <strong>owner, unscoped</strong> local
-            credential. Its namespace defaults to <code>local-owner</code>; keep the same namespace
-            for the same principal. Paste the token here; never put it in a Vite environment
-            variable, URL, or repository file.
-          </p>
-          <p>
-            The token is held only in this page’s memory and sent in the Bearer header. No cookies
-            or browser storage are used. Clearing any input invalidates the review. Resolve an
-            uncertain acceptance before closing or reloading this page.
-          </p>
-        </details>
-      </form>
+          <label>
+            Project ID
+            <input
+              value={inputs.projectId}
+              autoComplete="off"
+              spellCheck={false}
+              onChange={(event) => session.setInputs({ ...inputs, projectId: event.target.value })}
+              required
+            />
+          </label>
+          <label>
+            Candidate ref
+            <input
+              value={inputs.ref}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="option-a"
+              onChange={(event) => session.setInputs({ ...inputs, ref: event.target.value })}
+              required
+            />
+          </label>
+          <label>
+            Local owner token
+            <input
+              type="password"
+              value={inputs.token}
+              autoComplete="off"
+              spellCheck={false}
+              onChange={(event) => session.setInputs({ ...inputs, token: event.target.value })}
+              required
+            />
+          </label>
+          <button
+            type="submit"
+            disabled={
+              state.reviewing ||
+              state.accepting ||
+              unresolved ||
+              !inputs.projectId ||
+              !inputs.ref ||
+              !inputs.token
+            }
+          >
+            {state.reviewing ? "Reviewing…" : "Review option"}
+          </button>
+          <button
+            type="button"
+            className="secondary"
+            disabled={!inputs.token}
+            onClick={() => session.setInputs({ ...inputs, token: "" })}
+          >
+            Clear token
+          </button>
+          <details className="setup">
+            <summary>Local connection and credential setup</summary>
+            <p>
+              Run the local server on 127.0.0.1:4310 and the editor on localhost:5173 or
+              127.0.0.1:5173. Set <code>OR1_OWNER_TOKEN</code> on the server to a strong secret of
+              at least 32 bearer-safe characters, then run <code>pnpm dev:server</code> and{" "}
+              <code>pnpm dev:editor</code>. This configures the <strong>owner, unscoped</strong>{" "}
+              local credential. Its namespace defaults to <code>local-owner</code>; keep the same
+              namespace for the same principal. Paste the token here; never put it in a Vite
+              environment variable, URL, or repository file.
+            </p>
+            <p>
+              The token is held only in this page’s memory and sent in the Bearer header. No cookies
+              or browser storage are used. Clearing any input invalidates the review. Resolve an
+              uncertain acceptance before closing or reloading this page.
+            </p>
+          </details>
+        </form>
+      )}
       <div aria-live="polite">
         {state.message && (
           <p className="error" role="alert">
@@ -121,7 +229,7 @@ export function App() {
         )}
       </div>
 
-      {acceptance && (
+      {state.mode === "local" && acceptance && (
         <section className={`acceptance ${acceptance.status}`} aria-label="Acceptance request">
           <h2>
             {acceptance.status === "sending"
@@ -212,42 +320,60 @@ export function App() {
               bounds={bounds}
             />
           </div>
-          <section className="decision">
-            <div>
-              <h2>Accept into main</h2>
-              <p>
-                Source <code>{review.ref}</code> at <code>{review.option.revisionId}</code> → target{" "}
-                <strong>main</strong> at <code>{review.main.revisionId}</code>.
-              </p>
-              <p>
-                The server checks these pins and evaluates a fresh score in the acceptance
-                transaction. Manual and agent-created options use the same gate.
-              </p>
-              {!review.eligibility.allowed && (
-                <p className="error">
-                  <strong>Not eligible: {review.eligibility.code}</strong>.{" "}
-                  {review.eligibility.code === "stale_baseline"
-                    ? "This option remains reviewable, but its baseline is no longer main. It cannot be accepted."
-                    : "Resolve the option’s identity or scorecard problems before reviewing again."}
+          {state.mode === "local" ? (
+            <section className="decision">
+              <div>
+                <h2>Accept into main</h2>
+                <p>
+                  Source <code>{review.ref}</code> at <code>{review.option.revisionId}</code> →
+                  target <strong>main</strong> at <code>{review.main.revisionId}</code>.
                 </p>
-              )}
-            </div>
-            <button
-              type="button"
-              disabled={!review.eligibility.allowed || state.accepting || unresolved}
-              onClick={() => void session.accept()}
-            >
-              {state.accepting ? "Preparing acceptance…" : "Accept this option into main"}
-            </button>
-          </section>
+                <p>
+                  The server checks these pins and evaluates a fresh score in the acceptance
+                  transaction. Manual and agent-created options use the same gate.
+                </p>
+                {!review.eligibility.allowed && (
+                  <p className="error">
+                    <strong>Not eligible: {review.eligibility.code}</strong>.{" "}
+                    {review.eligibility.code === "stale_baseline"
+                      ? "This option remains reviewable, but its baseline is no longer main. It cannot be accepted."
+                      : "Resolve the option’s identity or scorecard problems before reviewing again."}
+                  </p>
+                )}
+              </div>
+              <button
+                type="button"
+                disabled={!review.eligibility.allowed || state.accepting || unresolved}
+                onClick={() => void session.accept()}
+              >
+                {state.accepting ? "Preparing acceptance…" : "Accept this option into main"}
+              </button>
+            </section>
+          ) : (
+            <section className="decision">
+              <div>
+                <h2>Read-only pilot</h2>
+                <p>
+                  Comparison and server scorecards only. Acceptance and agent runs are disabled for
+                  all pilot members, including owners.
+                </p>
+                <p>Option eligibility describes the option’s state, not permission to accept it.</p>
+              </div>
+            </section>
+          )}
         </>
       ) : (
         !acceptance && (
           <section className="empty">
             <h2>Bring an existing option to review</h2>
             <p>
-              Enter a project ID, candidate ref, and local owner token above. Main and the candidate
-              will be compared at the same scale, with their actual server scorecards.
+              {state.mode === "local"
+                ? "Enter a project ID, candidate ref, and local owner token above."
+                : state.mode === "cloud"
+                  ? "Choose an assigned project and candidate ref above. Ref suggestions are navigation aids, not access restrictions."
+                  : "Sign in through Cloudflare Access to load your assigned projects."}{" "}
+              Main and the candidate will be compared at the same scale, with their actual server
+              scorecards.
             </p>
           </section>
         )

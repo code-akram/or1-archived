@@ -79,13 +79,22 @@ details > p {
   border: 1px solid #d5ddd7;
   border-radius: 8px;
 }
+.cloud-connection {
+  grid-template-columns: 1fr 1fr auto auto;
+}
+.cloud-status {
+  margin: 0;
+  color: #53656a;
+  font-size: 13px;
+}
 label {
   display: grid;
   gap: 8px;
   font-size: 13px;
   font-weight: 600;
 }
-input {
+input,
+select {
   width: 100%;
   min-width: 0;
   padding: 10px 12px;
