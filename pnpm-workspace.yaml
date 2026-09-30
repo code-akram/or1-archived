@@ -7,6 +7,7 @@ allowBuilds:
   esbuild: true # verifies its platform binary
   '@google/genai': false # preinstall is a no-op
   protobufjs: false # postinstall is a version check, not needed
+  workerd: true # verifies the pinned platform binary for native Workers tests
 
 # pi 0.99.1 was released 2026-09-29 and is pinned deliberately (see notes/tech-stack.md).
 minimumReleaseAgeExclude:
