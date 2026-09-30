@@ -5,7 +5,8 @@
   "type": "module",
   "description": "SQLite store (node:sqlite): revisions, refs, briefs, redlines, runs, request outcomes.",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./portable": "./src/portable.ts"
   },
   "scripts": {
     "typecheck": "tsc -p .",

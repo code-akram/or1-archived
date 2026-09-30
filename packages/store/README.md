@@ -5,6 +5,54 @@ budget, seed and transcript data are finite JSON (`unknown` here); core schemas 
 domain validation belong to the authenticated tool registry. `db` is exposed for
 inspection and legacy compatibility, not application writes.
 
+## Portable engine
+
+`@or1/store/portable` exports `createStore(driver): PortableStore`, the complete
+command/result/caller/evaluator/run types, the three `MAX_*_BYTES` limits, and the
+synchronous SQL seam below. This is the same engine used by `openStore`, not a
+second implementation. It imports only `node:crypto` (synchronous hashing/UUIDs)
+and `node:buffer` (UTF-8 byte limits); compatible runtimes must provide those APIs.
+It does not import SQLite, filesystem/path/OS APIs, or use process environment.
+
+```ts
+type SqlBinding = string | number | null;
+type SqlRow = Record<string, SqlBinding>;
+type SqlStatement = {
+  get(...bindings: SqlBinding[]): SqlRow | undefined;
+  all(...bindings: SqlBinding[]): SqlRow[];
+  run(...bindings: SqlBinding[]): { changes: number };
+};
+type SqlDriver = {
+  prepare(sql: string): SqlStatement;
+  exec(sql: string): void;
+  transaction<T>(callback: () => T, mode: "read" | "write"): T;
+  getSchemaVersion(): number;
+  setSchemaVersion(version: number): void;
+  close(): void;
+};
+```
+
+Drivers must enable foreign-key enforcement before initialization, support the
+shared SQLite schema/migrations/triggers, and eagerly materialize rows. No async
+callbacks or cursors may escape a transaction. `run().changes` counts changes
+made by that statement, not cumulative changes or trigger side effects.
+Transactions commit on return and roll back on throw; `write` serializes writers,
+and `read` supplies a coherent snapshot without a write reservation where supported.
+
+`createStore` runs initialization in a driver `write` transaction. All version
+reads/writes happen inside it, so a failed migration rolls back both schema and
+version changes. The engine emits no PRAGMAs or transaction-control SQL. Drivers
+own schema-version storage (Node uses `user_version`; other runtimes may use a
+private metatable). The factory takes ownership of the driver: initialization
+failure calls `driver.close()`, and `store.close()` delegates to it on success.
+
+`PortableStore` has every existing store method but no `db`. The Node entry point
+retains all exports, `dataDir` and `openStore`, with
+`Store = PortableStore & { readonly db: DatabaseSync }`. Its driver preserves
+`BEGIN` for review reads, `BEGIN IMMEDIATE` for writes, foreign keys, the 5000 ms
+busy timeout, WAL for disk stores, and close-on-initialization-failure behavior.
+Raw database inspection remains Node-only.
+
 ## Commands
 
 ```ts
@@ -166,7 +214,7 @@ is justified; the store owns exact pin binding and persistence.
 
 ## Migration
 
-Schema `user_version` 0/1/2 migrates atomically to 3 without rewriting revision,
+Schema version 0/1/2 (Node `user_version`) migrates atomically to 3 without rewriting revision,
 brief, ref, run or transcript content. Legacy request outcomes retain exact JSON
 and live in a separate unscoped partition; new scoped commands cannot replay them.
 Legacy v0/v1 runs gain null revision/baseline/initial provenance and cannot be
