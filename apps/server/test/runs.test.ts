@@ -8,7 +8,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { applyChanges, type Brief, emptyModel, type Model, type Op, scorecard } from "@or1/core";
 import { dataDir, openStore, type Store } from "@or1/store";
-import { type ToolContext, tools } from "@or1/tools";
+import { type ReviewOptionResult, type ToolContext, tools } from "@or1/tools";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   areaEnvelopeEvidence,
@@ -210,6 +210,34 @@ describe("bounded persisted pi workflow", () => {
       expect(settled(reloaded).spend).toMatchObject({ tokens: 20, toolCalls: 1, rejections: 0 });
       const sent = stream.mock.calls[0]?.[2];
       expect(sent).toMatchObject({ maxTokens: DEFAULT_RUN_BUDGET.maxTokens, maxRetries: 0 });
+      const turns = reloaded.readRunTurns("run");
+      const review = (await execute(reloaded, "review_option", {
+        projectId: "p",
+        ref: "option",
+      })) as ReviewOptionResult;
+      if (!review.ok) throw new Error(review.code);
+      expect(review.option.revisionId).toBe(run.revisionId);
+      expect(review.option.scorecard).toEqual(run.evaluation?.result);
+      const acceptance = await execute(reloaded, "accept_option", {
+        projectId: "p",
+        ref: "main",
+        baseRevision: review.main.revisionId,
+        requestId: "owner-accepts-run-option",
+        body: {
+          sourceRef: "option",
+          sourceRevisionId: review.option.revisionId,
+          briefVersion: review.briefVersion,
+          baselineRevisionId: review.baselineRevisionId,
+          evaluatorVersion: review.option.scorecard.evaluatorVersion,
+        },
+      });
+      expect(acceptance).toMatchObject({
+        acceptance: { sourceRevisionId: run.revisionId, scorecard: run.evaluation?.result },
+      });
+      expect(reloaded.readState("p", "main")?.model).toEqual(state?.model);
+      expect(reloaded.readState("p", "option")?.revisionId).toBe(run.revisionId);
+      expect(reloaded.readRun("run")).toEqual(run);
+      expect(reloaded.readRunTurns("run")).toEqual(turns);
     } finally {
       reloaded.close();
     }

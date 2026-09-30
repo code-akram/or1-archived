@@ -78,7 +78,7 @@ export type Store = {
     evaluate?: AcceptanceEvaluator,
   ): AcceptanceResult;
   execute(
-    command: Command,
+    command: Exclude<Command, AcceptanceCommand>,
     caller: Caller,
     evaluate?: Evaluator,
     validateMetadata?: MetadataValidator,
@@ -443,7 +443,7 @@ export function openStore(path: string): Store {
     evaluate?: AcceptanceEvaluator,
   ): AcceptanceResult;
   function execute(
-    command: Command,
+    command: Exclude<Command, AcceptanceCommand>,
     caller: Caller,
     evaluate?: Evaluator,
     validateMetadata?: MetadataValidator,

@@ -315,9 +315,12 @@ describe("snapshot acceptance", () => {
         baselineRevisionId: accepted.revisionId,
         evaluatorVersion: "test-v2",
       }).map(([key, value]) => ({ ...command, body: { ...command.body, [key]: value } })),
-      { ...command, type: "apply_changes" as const, body: {} },
     ])
       expect(store.execute(changed, owner)).toEqual({ ok: false, code: "request_conflict" });
+    expect(store.execute({ ...command, type: "apply_changes", body: {} }, owner)).toEqual({
+      ok: false,
+      code: "request_conflict",
+    });
     expect(history(store)).toEqual(before);
   });
 
@@ -406,6 +409,17 @@ describe("snapshot acceptance", () => {
     brief(store, command.baseRevision);
     expect(store.execute(command, owner, reject)).toEqual(result);
     expect(reject).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a geometry evaluator for acceptance at both type and runtime boundaries", () => {
+    const store = storeAt();
+    const command = setup(store);
+    const before = history(store);
+    expect(() =>
+      // @ts-expect-error Acceptance requires a score evaluator, not a geometry evaluator.
+      store.execute(command, owner, () => ({ ok: true, model: {}, effects: [] })),
+    ).toThrow("Acceptance evaluator must return a synchronous evaluation or rejection");
+    expect(history(store)).toEqual(before);
   });
 
   it.each([

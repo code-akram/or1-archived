@@ -217,7 +217,7 @@ describe("transactional commands", () => {
       body: { model: {}, brief: {} },
     };
     const base = accepted(store.execute(createCommand, owner)).revisionId;
-    const commands: Command[] = [
+    const commands: Extract<Command, { type: "create_project" | "fork_ref" | "set_brief" }>[] = [
       createCommand,
       {
         type: "fork_ref",

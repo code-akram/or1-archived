@@ -37,7 +37,7 @@ function accepted(result: CommandResult): Extract<CommandResult, { ok: true }> {
   if (!result.ok) throw new Error(result.code);
   return result;
 }
-const creation: Command = {
+const creation: Extract<Command, { type: "create_project" }> = {
   type: "create_project",
   projectId: "p",
   ref: "main",
@@ -82,7 +82,11 @@ function startRun(store: Store, id = "run", ref = "option") {
   });
   store.updateRun(id, { status: "running" });
 }
-function change(baseRevision: string, requestId = "edit", ref = "option"): Command {
+function change(
+  baseRevision: string,
+  requestId = "edit",
+  ref = "option",
+): Extract<Command, { type: "apply_changes" }> {
   return {
     type: "apply_changes",
     projectId: "p",
@@ -413,7 +417,7 @@ describe("restart and v2 migration", () => {
   it("reloads an unfinished run with a missing turn, interrupts explicitly without resuming and permits old edit replay", () => {
     const path = databasePath();
     const first = openStore(path);
-    let command: Command;
+    let command: ReturnType<typeof change>;
     let edited: Extract<CommandResult, { ok: true }>;
     let base: string;
     try {
