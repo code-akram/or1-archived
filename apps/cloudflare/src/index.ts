@@ -16,9 +16,9 @@ import {
 import { sqlDriver } from "./sql.ts";
 
 export class Project extends DurableObject<Env> {
-  private store?: PortableStore;
+  #store?: PortableStore;
 
-  private boundProject(projectId: string) {
+  #boundProject(projectId: string) {
     const config = configuration(this.env);
     const project = config.projects.find((entry) => entry.projectId === projectId);
     if (!project || !this.ctx.id.equals(this.env.PROJECTS.idFromName(project.projectId)))
@@ -26,15 +26,15 @@ export class Project extends DurableObject<Env> {
     return { config, project };
   }
 
-  private openStore(): PortableStore {
-    this.store ??= createStore(sqlDriver(this.ctx.storage));
-    return this.store;
+  #openStore(): PortableStore {
+    this.#store ??= createStore(sqlDriver(this.ctx.storage));
+    return this.#store;
   }
 
   override async fetch(request: Request): Promise<Response> {
     try {
       const route = apiChecks(request, this.env);
-      const { config, project } = this.boundProject(request.headers.get("X-Or1-Project-Id") ?? "");
+      const { config, project } = this.#boundProject(request.headers.get("X-Or1-Project-Id") ?? "");
       const body = await bytes(request.body, MAX_REQUEST_BYTES);
       if (route === "session" && body.length) throw new HttpError(400, "invalid_input");
       const identity = await authenticate(request, this.env);
@@ -69,7 +69,7 @@ export class Project extends DurableObject<Env> {
       if (input.projectId !== project.projectId) throw new HttpError(404, "not_found");
       // The capability is restrictive even for owners. No browser actor can accept or mutate.
       const result = await reviewOption.execute(input, {
-        store: this.openStore(),
+        store: this.#openStore(),
         namespace: identity.principalId,
         role: member.membership === "owner" ? "owner" : "external",
         reviewProjectId: project.projectId,
@@ -85,8 +85,8 @@ export class Project extends DurableObject<Env> {
   /** Only a private service-binding entrypoint calls this RPC; fetch has no admin route. */
   async seedSyntheticDemoV1(): Promise<{ version: string; projectId: string }> {
     if (this.env.PROVISIONER_ENABLED !== "true") throw new Error("Provisioner disabled");
-    this.boundProject(DEMO_PROJECT_ID);
-    return this.ctx.blockConcurrencyWhile(() => seedDemoV1(this.openStore()));
+    this.#boundProject(DEMO_PROJECT_ID);
+    return this.ctx.blockConcurrencyWhile(() => seedDemoV1(this.#openStore()));
   }
 }
 

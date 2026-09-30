@@ -206,6 +206,18 @@ describe("native Worker and SQLite Project DO", () => {
     expect(await tables()).toEqual([]);
   });
 
+  it("does not expose internal helpers or raw store authority through DO RPC", async () => {
+    const ns = await mf.getDurableObjectNamespace("PROJECTS", "runtime");
+    const stub = ns.get(ns.idFromName(projectId)) as unknown as {
+      openStore(): Promise<unknown>;
+      boundProject(projectId: string): Promise<unknown>;
+    };
+    // Miniflare may reject the proxy method lookup synchronously, before producing a promise.
+    await expect(async () => stub.openStore()).rejects.toThrow('method "openStore"');
+    await expect(async () => stub.boundProject(projectId)).rejects.toThrow('method "boundProject"');
+    expect(await tables()).toEqual([]);
+  });
+
   it("rejects wrong methods/origins/authority/compression, admin and unknown API routes without SPA fallback", async () => {
     for (const path of [
       "/api/seed",

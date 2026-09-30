@@ -15,16 +15,23 @@ model APIs; they do not establish model design quality.
 See the [geometry contract](packages/core/docs/geometry-contract.md) and
 [brief and scorecard contract](packages/core/docs/brief-and-scorecard.md) for supported behavior and limitations.
 
+Cloudflare hosting is a separate **authenticated, synthetic-data read-only review pilot** using
+Workers Static Assets and SQLite Durable Objects. It preserves the local workflow; it does not
+expose cloud acceptance, online agents or real-client projects. See the
+[deployment and private provisioning runbook](deploy/cloudflare/README.md) and
+[editor session contract](apps/editor/README.md).
+
 ## Layout
 
 | Path | What it is |
 |---|---|
 | `packages/core` | Pure TypeScript model, ops, `apply_changes`, scorecard. No IO |
 | `packages/tools` | Tool registry: one TypeBox definition set for pi agents, MCP, HTTP and the CLI |
-| `packages/store` | SQLite store (`node:sqlite`): revisions, refs, briefs, redlines, runs, request outcomes |
+| `packages/store` | Portable SQLite engine + Node driver: revisions, refs, briefs, redlines, runs, request outcomes |
 | `apps/server` | HTTP API + SSE, MCP server (`/mcp`), run orchestrator (pi agents) |
 | `apps/cli` | `or1` command line |
 | `apps/editor` | Browser option review (Vite, React, SVG) |
+| `apps/cloudflare` | Access-verified read-only API and project SQLite Durable Objects |
 | `evals` | Fixtures, importers and eval scenarios |
 
 ## Development
