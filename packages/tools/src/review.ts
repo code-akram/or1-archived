@@ -1,7 +1,21 @@
 import type { Brief, Derived, Model, Scorecard } from "@or1/core";
-import type { Rejection } from "@or1/store";
+import type { Rejection } from "@or1/store/portable";
 
 /** Browser-safe contracts: this module has no runtime imports or registry dependencies. */
+export type CloudSession = {
+  mode: "cloud";
+  principalId: string;
+  /** Unix milliseconds. */
+  expiresAt: number;
+  projects: readonly {
+    projectId: string;
+    label: string;
+    membership: "owner" | "viewer";
+    /** Navigation suggestions, not a ref-level access restriction. */
+    refs: readonly string[];
+    permissions: { canReview: true; canAccept: false };
+  }[];
+};
 export type ReviewOptionInput = { projectId: string; ref: string };
 export type AcceptOptionInput = {
   projectId: string;

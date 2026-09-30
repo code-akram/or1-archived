@@ -23,12 +23,36 @@ bypass finite JSON/byte/schema validation, credentials, or trusted scope checks.
 but absent credentials return `unauthorized` and an absent store returns
 `store_unavailable`. No project read or mutation runs in either case. Enumerating
 tool definitions (including anonymous MCP `tools/list`) needs no execution context.
-Namespace, role, scope and run ID are never tool parameters. Unknown parameters
+Namespace, role, scope, run ID and review capability are never tool parameters. Unknown parameters
 are rejected. Scope is enforced before store access/replay; forks must satisfy it
-for both the target and source ref. `review_option` and `accept_option` require an
-owner credential, reject **any** scope (they touch both main and the option), and
+for both the target and source ref. Ordinary `review_option` and `accept_option`
+require an owner credential, reject **any** scope (they touch both main and the option), and
 reject trusted run bindings as `invalid_run_binding`, all before store access or
 cached replay. Nonowners and scoped credentials receive `forbidden`.
+
+### Trusted project review capability
+
+Cloud read-only adapters supply `readonly reviewProjectId?: string` on `ToolContext`
+for **both owners and viewers**. When present, this is a restrictive capability:
+only `review_option` may execute, its `projectId` must exactly equal the capability,
+and the credential role must be `owner` or `external`, never `agent`. Every other
+tool, including reads and acceptance, returns `forbidden`. Combining it with any
+`scope` returns `forbidden`; a review run binding returns `invalid_run_binding`.
+Malformed capability project IDs return `unauthorized`: they must be strings of
+1–128 UTF-16 code units without controls below U+0020. All restrictions are checked
+before even accessing the context's store. Ordinary external/MCP credentials
+without this trusted capability still cannot review options.
+
+The grant is whole-project review: a coherent result includes main and the current
+brief, and any valid nonmain candidate can be reviewed. Session `refs` are navigation
+suggestions, not an allowlist. The unchanged review `eligibility` describes the
+option's acceptance eligibility, **not** the caller's permission to accept. A viewer
+may see `{ allowed: true }` while acceptance remains forbidden. This is not a
+generic read-only flag, a new tool, or authority supplied in tool parameters.
+
+`ToolContext.store` uses `PortableStore`; registry contracts and runtime constants
+come from `@or1/store/portable`, never the Node store entrypoint. The registry keeps
+synchronous validation and uses Workers-supported `node:buffer` for byte budgets.
 
 All results are `{ text, data }`. `data` contains the structured read or command
 outcome. Input failures, core `InputError`s, and domain rejections return
@@ -147,7 +171,12 @@ Browser consumers may use `import type` from `@or1/tools`; `src/review.ts` conta
 only type imports and DTO exports, never Node/registry runtime code. Public DTOs
 are `ReviewOptionInput`, `PlanReview`, `ReviewOptionSuccess`, `ReviewOptionResult`,
 `AcceptOptionInput`, `AcceptanceReceipt` (scorecard narrowed to core `Scorecard`),
-`AcceptOptionSuccess`, and `AcceptOptionResult`, exported type-only from the index.
+`AcceptOptionSuccess`, `AcceptOptionResult`, and `CloudSession`, exported type-only
+from the index. `CloudSession` contains `{ mode: "cloud", principalId, expiresAt,
+projects }`, where `expiresAt` is Unix milliseconds and each project has
+`{ projectId, label, membership: "owner" | "viewer", refs,
+permissions: { canReview: true, canAccept: false } }`. Projects and refs are readonly
+arrays; neither cloud membership grants acceptance in this pilot.
 
 ## Requirement identity and brief edits
 

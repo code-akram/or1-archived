@@ -1,16 +1,18 @@
 import { Buffer } from "node:buffer";
 import { InputError, type Role } from "@or1/core";
-import type { Store } from "@or1/store";
+import type { PortableStore } from "@or1/store/portable";
 import type { Static, TSchema } from "typebox";
 import { Value } from "typebox/value";
 
 /** Per-call context supplied by the adapter (pi agent, MCP, HTTP or CLI). The role comes from credentials. */
 export type ToolContext = {
   readonly role: Role;
-  readonly store?: Store;
+  readonly store?: PortableStore;
   readonly namespace?: string;
   readonly scope?: { readonly projectId: string; readonly ref: string };
   readonly runId?: string;
+  /** Trusted restrictive capability: only review_option for this whole project, never acceptance. */
+  readonly reviewProjectId?: string;
 };
 
 export type ToolResult = {
@@ -50,12 +52,28 @@ export function defineTool<P extends TSchema>(tool: ToolDefinition<P>): ToolDefi
           [...ctx.namespace].some((character) => character.charCodeAt(0) < 32)
         )
           return result({ ok: false, code: "unauthorized" });
-        if (tool.name === "review_option" || tool.name === "accept_option") {
+        const input = params as { projectId?: string; ref?: string; body?: { sourceRef?: string } };
+        if (ctx.reviewProjectId !== undefined) {
+          if (
+            typeof ctx.reviewProjectId !== "string" ||
+            !ctx.reviewProjectId.length ||
+            ctx.reviewProjectId.length > 128 ||
+            [...ctx.reviewProjectId].some((character) => character.charCodeAt(0) < 32)
+          )
+            return result({ ok: false, code: "unauthorized" });
+          if (
+            tool.name !== "review_option" ||
+            input.projectId !== ctx.reviewProjectId ||
+            ctx.role === "agent" ||
+            ctx.scope !== undefined
+          )
+            return result({ ok: false, code: "forbidden" });
+          if (ctx.runId !== undefined) return result({ ok: false, code: "invalid_run_binding" });
+        } else if (tool.name === "review_option" || tool.name === "accept_option") {
           if (ctx.role !== "owner" || ctx.scope !== undefined)
             return result({ ok: false, code: "forbidden" });
           if (ctx.runId !== undefined) return result({ ok: false, code: "invalid_run_binding" });
         }
-        const input = params as { projectId?: string; ref?: string; body?: { sourceRef?: string } };
         if (
           ctx.scope &&
           (input.projectId !== ctx.scope.projectId ||

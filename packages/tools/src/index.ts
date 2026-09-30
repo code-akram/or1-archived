@@ -21,8 +21,8 @@ import type {
   Evaluation,
   RefState,
   Rejection,
-} from "@or1/store";
-import { MAX_ACCEPTANCE_RECEIPT_BYTES } from "@or1/store";
+} from "@or1/store/portable";
+import { MAX_ACCEPTANCE_RECEIPT_BYTES } from "@or1/store/portable";
 import { type TSchema, Type } from "typebox";
 import { defineTool, result, type ToolContext, type ToolDefinition } from "./registry.ts";
 import type { AcceptanceReceipt, PlanReview, ReviewOptionSuccess } from "./review.ts";
@@ -34,6 +34,7 @@ export type {
   AcceptOptionInput,
   AcceptOptionResult,
   AcceptOptionSuccess,
+  CloudSession,
   PlanReview,
   ReviewOptionInput,
   ReviewOptionResult,
@@ -143,7 +144,7 @@ function acceptanceEligibility(
 export const reviewOption = defineTool({
   name: "review_option",
   description:
-    "Owner-only coherent review of an option against current main and the current brief.",
+    "Coherent option review against current main and brief; requires owner or trusted project review capability.",
   parameters: strict({
     projectId: identifier,
     ref: Type.String({ ...identifier, not: { const: "main" } }),

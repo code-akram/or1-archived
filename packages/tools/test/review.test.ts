@@ -195,6 +195,211 @@ describe("review and acceptance authorization", () => {
     expect(read).not.toHaveBeenCalled();
   });
 
+  it.each(["owner", "external"] as const)(
+    "restricts project review capability for %s across every registry tool before store access",
+    async (role) => {
+      await setup();
+      const accepted = acceptance();
+      expect(await accept(accepted)).toMatchObject({ ok: true });
+      const envelope = {
+        projectId: "p",
+        ref: "main",
+        baseRevision: state().revisionId,
+        requestId: "restricted",
+      };
+      const inputs: Record<string, unknown> = {
+        inspect_project: { projectId: "p" },
+        scorecard: { projectId: "p", ref: "option" },
+        apply_changes: {
+          ...envelope,
+          body: { ops: [], briefVersion: 1, baselineRevisionId: null },
+        },
+        create_project: {
+          ...envelope,
+          baseRevision: null,
+          body: { model: fixture(), brief },
+        },
+        fork_ref: { ...envelope, ref: "new-option", body: { sourceRef: "main" } },
+        set_brief: { ...envelope, baseBriefVersion: 1, body: { brief } },
+        review_option: { projectId: "p", ref: "option" },
+        accept_option: accepted,
+      };
+      const storeAccess = vi.fn((): Store => {
+        throw new Error("Restricted calls must not access the store");
+      });
+      const context: ToolContext = {
+        role,
+        namespace: "cloud",
+        reviewProjectId: "p",
+        get store() {
+          return storeAccess();
+        },
+      };
+      for (const tool of tools) {
+        expect(inputs).toHaveProperty(tool.name);
+        if (tool.name === "review_option") {
+          expect(
+            await call(tool.name, inputs[tool.name], { ...ctx, role, reviewProjectId: "p" }),
+          ).toMatchObject({ ok: true });
+        } else {
+          expect(await call(tool.name, inputs[tool.name], context)).toMatchObject({
+            ok: false,
+            code: "forbidden",
+          });
+        }
+      }
+      expect(storeAccess).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects wrong-project, agent, scope and run-bound review capabilities before store access", async () => {
+    const storeAccess = vi.fn((): Store => {
+      throw new Error("Invalid capabilities must not access the store");
+    });
+    for (const role of ["owner", "external"] as const) {
+      for (const [extra, code] of [
+        [{ reviewProjectId: "other" }, "forbidden"],
+        [{ role: "agent" }, "forbidden"],
+        [{ scope: { projectId: "p", ref: "option" } }, "forbidden"],
+        [{ scope: { projectId: "p", ref: "main" } }, "forbidden"],
+        [{ runId: "run" }, "invalid_run_binding"],
+        [{ runId: "" }, "invalid_run_binding"],
+      ] as const) {
+        const context: ToolContext = {
+          role,
+          namespace: "cloud",
+          reviewProjectId: "p",
+          ...extra,
+          get store() {
+            return storeAccess();
+          },
+        };
+        expect(
+          await call("review_option", { projectId: "p", ref: "option" }, context),
+        ).toMatchObject({ ok: false, code });
+      }
+    }
+    expect(storeAccess).not.toHaveBeenCalled();
+  });
+
+  it("validates bounded project capability context and never accepts it from parameters", async () => {
+    const storeAccess = vi.fn((): Store => {
+      throw new Error("Malformed capabilities must not access the store");
+    });
+    for (const reviewProjectId of [
+      null,
+      false,
+      1,
+      {},
+      [],
+      "",
+      "p".repeat(129),
+      "p\u0000",
+      "p\u001f",
+    ]) {
+      for (const role of ["owner", "external"] as const) {
+        const context = {
+          role,
+          namespace: "cloud",
+          reviewProjectId,
+          get store() {
+            return storeAccess();
+          },
+        } as unknown as ToolContext;
+        expect(
+          await call("review_option", { projectId: "p", ref: "option" }, context),
+        ).toMatchObject({ ok: false, code: "unauthorized" });
+      }
+    }
+    expect(storeAccess).not.toHaveBeenCalled();
+    const read = vi
+      .spyOn(store, "readReview")
+      .mockReturnValue({ ok: false, code: "ref_not_found" });
+    for (const projectId of ["p", "p".repeat(128), "p\u0020"]) {
+      expect(
+        await call(
+          "review_option",
+          { projectId, ref: "option" },
+          {
+            ...ctx,
+            role: "external",
+            reviewProjectId: projectId,
+          },
+        ),
+      ).toMatchObject({ ok: false, code: "ref_not_found" });
+      expect(read).toHaveBeenLastCalledWith(projectId, "option");
+    }
+    read.mockClear();
+    expect(
+      await call(
+        "review_option",
+        {
+          projectId: "p",
+          ref: "option",
+          reviewProjectId: "p",
+        },
+        { ...ctx, role: "external" },
+      ),
+    ).toMatchObject({ ok: false, code: "invalid_input" });
+    expect(
+      await call(
+        "review_option",
+        { projectId: "p", ref: "option" },
+        {
+          ...ctx,
+          role: "external",
+        },
+      ),
+    ).toMatchObject({ ok: false, code: "forbidden" });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("returns real viewer review and option eligibility for any project candidate without granting acceptance", async () => {
+    await setup();
+    await call("fork_ref", {
+      projectId: "p",
+      ref: "unlisted-option",
+      baseRevision: state().revisionId,
+      requestId: "unlisted-fork",
+      body: { sourceRef: "main" },
+    });
+    await change("unlisted-option", "viewer-label", [
+      { op: "tag_space", space: "S8", label: "Unlisted candidate" },
+    ]);
+    const viewer: ToolContext = {
+      ...ctx,
+      role: "external",
+      namespace: "viewer",
+      reviewProjectId: "p",
+    };
+    const mainBefore = state();
+    const candidate = state("unlisted-option");
+    const reviewed = await call("review_option", { projectId: "p", ref: candidate.ref }, viewer);
+    expect(reviewed).toEqual(await review(candidate.ref));
+    expect(reviewed).toMatchObject({
+      ok: true,
+      projectId: "p",
+      brief,
+      eligibility: { allowed: true },
+      main: { revisionId: mainBefore.revisionId, model: mainBefore.model },
+      option: {
+        revisionId: candidate.revisionId,
+        model: candidate.model,
+        derived: { spaces: [{ id: "S8", requirementId: "bed", netArea: 10_640_000 }] },
+        scorecard: { valid: true, certification: "none" },
+      },
+    });
+    expect(JSON.parse(JSON.stringify(reviewed))).toEqual(reviewed);
+    expect(
+      await call("accept_option", acceptance("viewer-accept", candidate.ref), viewer),
+    ).toMatchObject({ ok: false, code: "forbidden" });
+    expect(state()).toEqual(mainBefore);
+    await change("main", "advance-main");
+    expect(
+      await call("review_option", { projectId: "p", ref: candidate.ref }, viewer),
+    ).toMatchObject({ ok: true, eligibility: { allowed: false, code: "stale_baseline" } });
+  });
+
   it("rejects missing/nonmain refs, invalid bounds, nullable pins, and spoofed authority/evidence", async () => {
     await setup();
     const read = vi.spyOn(store, "readReview");
