@@ -72,7 +72,11 @@ function counts(store: Store) {
   );
 }
 
-function pinnedRun(store: Store, id = "run", ref = "main"): RunRecord {
+function pinnedRun(
+  store: Store,
+  id = "run",
+  ref = "main",
+): Omit<RunRecord, "initialRevisionId" | "evaluation"> {
   const state = store.readState("p", ref);
   if (!state) throw new Error("Missing test state");
   return {
@@ -642,7 +646,7 @@ describe("legacy migration and run persistence", () => {
     `);
       legacy.close();
       const store = storeAt(path);
-      expect(store.db.prepare("PRAGMA user_version").get()?.user_version).toBe(2);
+      expect(store.db.prepare("PRAGMA user_version").get()?.user_version).toBe(3);
       expect(
         store.db.prepare("SELECT snapshot, change_set, created_at FROM revisions").get(),
       ).toMatchObject({
@@ -669,6 +673,8 @@ describe("legacy migration and run persistence", () => {
       });
       expect(store.readRun("old-run")).toMatchObject({
         revisionId: null,
+        initialRevisionId: null,
+        evaluation: null,
         baselineRevisionId: null,
         outcome: "infeasible",
       });
@@ -686,7 +692,7 @@ describe("legacy migration and run persistence", () => {
           .get()?.n,
       ).toBe(2);
       const reopened = storeAt(path);
-      expect(reopened.db.prepare("PRAGMA user_version").get()?.user_version).toBe(2);
+      expect(reopened.db.prepare("PRAGMA user_version").get()?.user_version).toBe(3);
       expect(reopened.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     },
   );
@@ -712,6 +718,8 @@ describe("legacy migration and run persistence", () => {
     store.updateRun("run", { status: "running", retryCount: 1 });
     expect(store.readRun("run")).toEqual({
       ...run,
+      initialRevisionId: base,
+      evaluation: null,
       status: "running",
       retryCount: 1,
     });
@@ -812,17 +820,24 @@ describe("legacy migration and run persistence", () => {
     const store = storeAt();
     const base = create(store);
     store.createRun(pinnedRun(store));
-    const result = store.finalizeRun("run", "infeasible");
+    const evaluation = {
+      revisionId: base,
+      briefVersion: 1,
+      baselineRevisionId: null,
+      evaluatorVersion: "test-v1",
+      result: { score: 3 },
+    };
+    const result = store.finalizeRun("run", "infeasible", evaluation);
     expect(result).toEqual({ ok: true, revisionId: base, briefVersion: 1, effects: [] });
     expect(store.readRun("run")).toMatchObject({ status: "done", outcome: "infeasible" });
-    expect(store.finalizeRun("run", "infeasible")).toEqual(result);
+    expect(store.finalizeRun("run", "infeasible", evaluation)).toEqual(result);
     expect(store.finalizeRun("run", "options")).toEqual({ ok: false, code: "run_finished" });
     expect(() => store.updateRun("run", { status: "running" })).toThrow("finished");
   });
 
   it("bounds turn bytes across transcript, result and spend, and rolls back failed finalization", () => {
     const store = storeAt();
-    create(store);
+    const base = create(store);
     store.createRun(pinnedRun(store));
     // JSON quotes plus two null values add exactly 10 bytes.
     store.saveRunTurn({
@@ -854,9 +869,16 @@ describe("legacy migration and run persistence", () => {
     store.db.exec(
       "CREATE TRIGGER fail_finalize BEFORE UPDATE ON runs BEGIN SELECT RAISE(ABORT, 'finalize failure'); END;",
     );
-    expect(() => store.finalizeRun("run", "options")).toThrow("finalize failure");
+    const evaluation = {
+      revisionId: base,
+      briefVersion: 1,
+      baselineRevisionId: null,
+      evaluatorVersion: "test-v1",
+      result: { score: 3 },
+    };
+    expect(() => store.finalizeRun("run", "options", evaluation)).toThrow("finalize failure");
     expect(store.readRun("run")).toMatchObject({ status: "queued", outcome: null });
     store.db.exec("DROP TRIGGER fail_finalize");
-    accepted(store.finalizeRun("run", "options"));
+    accepted(store.finalizeRun("run", "options", evaluation));
   });
 });

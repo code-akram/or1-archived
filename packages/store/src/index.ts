@@ -81,16 +81,26 @@ export type Store = {
   readState(projectId: string, ref: string): RefState | null;
   readSnapshot(projectId: string, revisionId: string): unknown;
   readBriefs(projectId: string): RefState["brief"][];
-  createRun(run: RunRecord): void;
+  createRun(run: Omit<RunRecord, "initialRevisionId" | "evaluation">): void;
   updateRun(id: string, patch: RunPatch): void;
-  finalizeRun(id: string, outcome: NonNullable<RunRecord["outcome"]>): CommandResult;
+  finalizeRun(
+    id: string,
+    outcome: NonNullable<RunRecord["outcome"]>,
+    evaluation?: RunEvaluation,
+  ): CommandResult;
+  interruptRunningRuns(): number;
   readRun(id: string): RunRecord | null;
   saveRunTurn(turn: RunTurn): void;
   readRunTurns(runId: string): RunTurn[];
   close(): void;
 };
 
-export type Caller = { role: "owner" | "agent" | "external"; namespace: string };
+export type Caller = {
+  role: "owner" | "agent" | "external";
+  namespace: string;
+  /** Trusted workflow binding, never accepted from tool arguments. */
+  runId?: string;
+};
 type Envelope = { projectId: string; ref: string; baseRevision: string | null; requestId: string };
 /** The registry supplies core validation through validateMetadata/evaluate (core stays independent).
  * For fork_ref, ref is the new target name and baseRevision is the sourceRef's expected head.
@@ -132,13 +142,23 @@ export type RunRecord = {
   status: "queued" | "running" | "done" | "failed" | "cancelled" | "interrupted";
   outcome: "options" | "infeasible" | "not_found_within_budget" | null;
   instruction: string;
-  /** Null only for historical v1 run rows, which cannot be finalized by this API. */
+  /** Mutable cursor; null only for historical v1 runs, which cannot be finalized. */
   revisionId: string | null;
+  /** Derived at creation, immutable; historical missing provenance stays null. */
+  readonly initialRevisionId: string | null;
   baselineRevisionId: string | null;
   briefVersion: number;
   strategySeed: unknown;
   budget: unknown;
   retryCount: number;
+  evaluation: RunEvaluation | null;
+};
+export type RunEvaluation = {
+  revisionId: string;
+  briefVersion: number;
+  baselineRevisionId: string | null;
+  evaluatorVersion: string;
+  result: unknown;
 };
 export type RunPatch = {
   status?: Exclude<RunRecord["status"], "done">;
@@ -153,6 +173,8 @@ export type RunTurn = {
 };
 /** Maximum UTF-8 bytes of a turn's combined canonical transcript/result/spend JSON. */
 export const MAX_RUN_TURN_BYTES = 65_536;
+/** Maximum UTF-8 bytes of the complete canonical final evaluation JSON. */
+export const MAX_RUN_EVALUATION_BYTES = 65_536;
 
 function transaction<T>(db: DatabaseSync, action: () => T): T {
   db.exec("BEGIN IMMEDIATE");
@@ -169,7 +191,7 @@ function transaction<T>(db: DatabaseSync, action: () => T): T {
 function migrate(db: DatabaseSync): void {
   transaction(db, () => {
     const version = Number(db.prepare("PRAGMA user_version").get()?.user_version);
-    if (version > 2) throw new Error(`Unsupported store schema version ${version}`);
+    if (version > 3) throw new Error(`Unsupported store schema version ${version}`);
     if (version < 1) {
       db.exec(SCHEMA_V1);
       db.exec("PRAGMA user_version = 1");
@@ -253,6 +275,24 @@ function migrate(db: DatabaseSync): void {
         CREATE TRIGGER immutable_brief BEFORE UPDATE ON briefs
           BEGIN SELECT RAISE(ABORT, 'Brief versions are immutable'); END;
         PRAGMA user_version = 2;
+      `);
+    }
+    if (version < 3) {
+      db.exec(`
+        ALTER TABLE runs ADD COLUMN initial_revision_id TEXT REFERENCES revisions(id);
+        ALTER TABLE runs ADD COLUMN evaluation TEXT;
+        UPDATE runs SET initial_revision_id = revision_id;
+        CREATE TRIGGER immutable_run_pins BEFORE UPDATE ON runs
+          WHEN OLD.initial_revision_id IS NOT NEW.initial_revision_id
+            OR OLD.project_id IS NOT NEW.project_id OR OLD.ref IS NOT NEW.ref
+            OR OLD.brief_version IS NOT NEW.brief_version
+            OR OLD.baseline_revision_id IS NOT NEW.baseline_revision_id
+          BEGIN SELECT RAISE(ABORT, 'Run provenance and context pins are immutable'); END;
+        CREATE TRIGGER initial_run_project BEFORE INSERT ON runs
+          WHEN NEW.initial_revision_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM revisions WHERE id = NEW.initial_revision_id AND project_id = NEW.project_id)
+          BEGIN SELECT RAISE(ABORT, 'Initial run revision belongs to another project'); END;
+        PRAGMA user_version = 3;
       `);
     }
   });
@@ -342,7 +382,11 @@ export function openStore(path: string): Store {
     evaluate?: Evaluator,
     validateMetadata?: MetadataValidator,
   ): CommandResult {
-    if (!bounded(caller.namespace, 256) || !["owner", "agent", "external"].includes(caller.role)) {
+    if (
+      !bounded(caller.namespace, 256) ||
+      !["owner", "agent", "external"].includes(caller.role) ||
+      (caller.runId !== undefined && !bounded(caller.runId))
+    ) {
       return { ok: false, code: "invalid_caller" };
     }
     if (
@@ -364,6 +408,17 @@ export function openStore(path: string): Store {
       return { ok: false, code: "forbidden" };
     const commandJson = json(command);
     return transaction(db, () => {
+      // Authenticate immutable binding before replay, but never require a historical retry's
+      // cursor/status to still be current. The registry alone supplies the trusted run ID.
+      const run = caller.runId === undefined ? null : readRun(caller.runId);
+      if (
+        caller.runId !== undefined &&
+        (command.type !== "apply_changes" ||
+          !run ||
+          run.projectId !== command.projectId ||
+          run.ref !== command.ref)
+      )
+        return { ok: false, code: "invalid_run_binding" };
       const previous = db
         .prepare(
           "SELECT fingerprint, context, outcome FROM request_outcomes WHERE project_id = ? AND namespace = ? AND request_id = ?",
@@ -386,6 +441,8 @@ export function openStore(path: string): Store {
           json({
             command: JSON.parse(commandJson),
             role: caller.role,
+            // Omit absent binding to preserve v2 unbound request fingerprints exactly.
+            ...(caller.runId === undefined ? {} : { runId: caller.runId }),
             context: JSON.parse(context),
           }),
         )
@@ -450,6 +507,10 @@ export function openStore(path: string): Store {
       if (!state) return persist({ ok: false, code: "ref_not_found" });
       if (command.baseRevision !== state.revisionId)
         return persist({ ok: false, code: "stale_base" });
+      if (run) {
+        if (run.status !== "running") return persist({ ok: false, code: "run_not_running" });
+        if (!runCurrent(run)) return persist({ ok: false, code: "stale_run" });
+      }
       if (command.type === "fork_ref") {
         if (readState(command.projectId, command.ref))
           return persist({ ok: false, code: "ref_exists" });
@@ -506,6 +567,14 @@ export function openStore(path: string): Store {
         command.projectId,
         command.ref,
       );
+      if (run) {
+        const updated = db
+          .prepare(
+            "UPDATE runs SET revision_id = ? WHERE id = ? AND status = 'running' AND revision_id = ?",
+          )
+          .run(revisionId, run.id, state.revisionId);
+        if (updated.changes !== 1) throw new Error("Run cursor advancement failed");
+      }
       return persist({ ok: true, revisionId, briefVersion: state.brief.version, effects });
     });
   }
@@ -521,16 +590,23 @@ export function openStore(path: string): Store {
       outcome: row.outcome as RunRecord["outcome"],
       instruction: String(row.instruction),
       revisionId: row.revision_id === null ? null : String(row.revision_id),
+      initialRevisionId: row.initial_revision_id === null ? null : String(row.initial_revision_id),
       baselineRevisionId:
         row.baseline_revision_id === null ? null : String(row.baseline_revision_id),
       briefVersion: Number(row.brief_version),
       strategySeed: row.strategy_seed === null ? null : JSON.parse(String(row.strategy_seed)),
       budget: JSON.parse(String(row.budget)),
       retryCount: Number(row.retry_count),
+      evaluation: row.evaluation === null ? null : JSON.parse(String(row.evaluation)),
     };
   }
 
-  function runCurrent(run: RunRecord): boolean {
+  function runCurrent(
+    run: Pick<
+      RunRecord,
+      "projectId" | "ref" | "revisionId" | "briefVersion" | "baselineRevisionId"
+    >,
+  ): boolean {
     const state = readState(run.projectId, run.ref);
     return Boolean(
       state &&
@@ -573,7 +649,7 @@ export function openStore(path: string): Store {
           throw new Error("Invalid initial run");
         if (!runCurrent(run)) throw new Error("Run pins are stale");
         db.prepare(
-          "INSERT INTO runs (id, project_id, ref, status, outcome, instruction, brief_version, strategy_seed, budget, retry_count, revision_id, baseline_revision_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO runs (id, project_id, ref, status, outcome, instruction, brief_version, strategy_seed, budget, retry_count, revision_id, baseline_revision_id, initial_revision_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(
           run.id,
           run.projectId,
@@ -587,6 +663,7 @@ export function openStore(path: string): Store {
           run.retryCount,
           run.revisionId,
           run.baselineRevisionId,
+          run.revisionId,
         );
       }),
     updateRun: (id, patch) =>
@@ -607,12 +684,20 @@ export function openStore(path: string): Store {
           id,
         );
       }),
-    finalizeRun: (id, outcome) =>
+    finalizeRun: (id, outcome, evaluation) =>
       transaction(db, () => {
         const run = readRun(id);
         if (!run) return { ok: false, code: "run_not_found" };
         if (!runCurrent(run)) return { ok: false, code: "stale_run" };
-        if (run.status === "done" && run.outcome === outcome)
+        const score = evaluation === undefined ? null : json(evaluation);
+        if (score !== null && Buffer.byteLength(score) > MAX_RUN_EVALUATION_BYTES)
+          return { ok: false, code: "score_too_large" };
+        if (
+          run.status === "done" &&
+          run.outcome === outcome &&
+          (evaluation !== undefined || outcome === "not_found_within_budget") &&
+          json(run.evaluation) === (score ?? "null")
+        )
           return {
             ok: true,
             revisionId: run.revisionId as string,
@@ -621,7 +706,29 @@ export function openStore(path: string): Store {
           };
         if (run.status !== "queued" && run.status !== "running")
           return { ok: false, code: "run_finished" };
-        db.prepare("UPDATE runs SET status = 'done', outcome = ? WHERE id = ?").run(outcome, id);
+        if (evaluation === undefined) {
+          if (outcome !== "not_found_within_budget") return { ok: false, code: "score_required" };
+        } else {
+          if (
+            !bounded(evaluation.evaluatorVersion) ||
+            !bounded(evaluation.revisionId) ||
+            !Number.isSafeInteger(evaluation.briefVersion) ||
+            evaluation.briefVersion < 0 ||
+            (evaluation.baselineRevisionId !== null && !bounded(evaluation.baselineRevisionId))
+          )
+            return { ok: false, code: "invalid_score" };
+          if (
+            evaluation.revisionId !== run.revisionId ||
+            evaluation.briefVersion !== run.briefVersion ||
+            evaluation.baselineRevisionId !== run.baselineRevisionId
+          )
+            return { ok: false, code: "stale_score" };
+        }
+        db.prepare("UPDATE runs SET status = 'done', outcome = ?, evaluation = ? WHERE id = ?").run(
+          outcome,
+          score,
+          id,
+        );
         return {
           ok: true,
           revisionId: run.revisionId as string,
@@ -629,6 +736,16 @@ export function openStore(path: string): Store {
           effects: [],
         };
       }),
+    interruptRunningRuns: () =>
+      transaction(db, () =>
+        Number(
+          db
+            .prepare(
+              "UPDATE runs SET status = 'interrupted' WHERE status = 'running' AND outcome IS NULL",
+            )
+            .run().changes,
+        ),
+      ),
     saveRunTurn: (turn) =>
       transaction(db, () => {
         if (!Number.isSafeInteger(turn.turn) || turn.turn < 0)
