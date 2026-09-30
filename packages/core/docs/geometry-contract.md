@@ -26,8 +26,9 @@ This specifies the implemented schema-version-2 core, not the future editor or s
   Crossings subdivide the derived graph without splitting the authoritative wall or issuing new IDs.
 
 Geometry constants are exported as `GEOMETRY`; the conservative execution envelope is `LIMITS`.
-Coordinates are bounded to ±1,000,000 mm, dimensions to 2,000,000 mm, IDs/counters to 1,000,000,
-and models to 128 walls, 256 openings and 256 spaces. Batches contain at most 256 operations.
+Coordinates are bounded to ±1,000,000 mm and dimensions to 2,000,000 mm. Element ID suffixes are
+strictly below 1,000,000; counters are at most 1,000,000 and must exceed issued suffixes.
+Models contain at most 128 walls, 256 openings and 256 spaces; batches at most 256 operations.
 Post-operation draft coordinates and counters are checked before reconciliation. Grids are bounded
 to 65,536 cells before allocation, graphs to 512 segments before pairwise clearance, and bounded
 faces to 256 before identity allocation. Width checks reserve work before enumeration, with at most

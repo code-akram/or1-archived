@@ -4,8 +4,13 @@ An agent-native architecture editor for concept and schematic design. The archit
 
 V0 is parallel test-fits: the architect enters a shell and a brief, N agents each produce a layout option, and each option comes back with a scorecard and a rendered plan.
 
-Status: core geometry, operations, space identity, and scorecard are implemented and tested.
-Application and persistence integration remain scaffold; the end-to-end test-fit workflow is not yet functional.
+Status: the v2 core, transactional SQLite mutation path, shared tool registry, and first bounded
+persisted single-option pi workflow are implemented. Requirements use explicit space assignments;
+scorecards pass configured concept-design checks, **not building-code certification**.
+The workflow is programmatic and credential-bound; default HTTP/MCP exposes no unauthenticated
+project access or mutation. The editor, rendered-option comparison, acceptance into main, and full
+agent/diversity evaluation suite remain future work. Deterministic injected pi streams verify the
+workflow without spending on external model APIs; they do not establish model design quality.
 See the [geometry contract](packages/core/docs/geometry-contract.md) and
 [brief and scorecard contract](packages/core/docs/brief-and-scorecard.md) for supported behavior and limitations.
 
@@ -35,6 +40,20 @@ pnpm or1 tools    # CLI
 ```
 
 Project data lives in `~/.local/share/or1` (`OR1_DATA_DIR` overrides it), never in this repo.
+
+## Persisted workflow contracts
+
+- [Registry](packages/tools/README.md): shared schemas, trusted credentials, metadata commands,
+  explicit brief/baseline pins, and requirement-ID lineage.
+- [Store](packages/store/README.md): atomic revisions/ref/run cursors/request outcomes,
+  canonical idempotent replay, historical migrations, and exact evaluation pins.
+- [Run workflow](apps/server/README.md): bounded single-option execution, cancellation, persisted
+  tool intents/results, fail-closed restart, and supported programmatic invocation.
+
+Legacy v1 documents stay intact. `migrateV1` is an explicit import helper; repeated-program briefs
+require a reviewed v2 replacement rather than inferred allocation. There is no in-place history
+rewrite or automatic resume. Resource envelopes apply to internal agent inputs too; budget
+exhaustion and candidate gate failures are not proofs of infeasibility.
 
 ## Licence
 

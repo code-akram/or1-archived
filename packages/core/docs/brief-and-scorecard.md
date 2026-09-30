@@ -27,6 +27,14 @@ matched against persistent space **program tags**, not labels or inferred room s
 - Optional `thresholds` overrides individual design minima; omitted fields retain the defaults below.
   Overrides must be positive integer millimetres. They do not override the geometry contract.
 
+The first-workflow envelope allows at most 128 requirements, quantities from 1 to 128 with total
+quantity at most 256, and 256 constraints. Requirement IDs are case-sensitive, at most 64 characters,
+begin with an ASCII letter, and otherwise contain letters, digits, underscores or hyphens.
+Target/constraint areas are at most 4,000,000 m²; constraint widths and threshold overrides are at
+most 2,000,000 mm. Each circulation/exemption list has at most 128 entries. Invalid schema or bounds
+raise `InputError` (`invalid_input` or `limit_exceeded`); the geometry contract also bounds aggregate
+scorecard width work. These are execution limits, not promised feasible sizes or design minima.
+
 Each space has at most one persistent `requirementId`, set through `tag_space`. Counts, area-fit and
 habitable daylight use only explicitly assigned spaces with matching programs. Unassigned spaces
 are allowed but cannot satisfy quantities. Separate same-program requirements may have different
