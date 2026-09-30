@@ -23,8 +23,26 @@ mode. Server option eligibility is not authorization to accept. There is no pend
 acceptance storage or recovery workflow in this milestone.
 
 A public-host session 404, login redirect/HTML, malformed response, failed request or expired JWT
-fails closed without exposing local credentials. Use **Refresh session** after login; **Reload to
-sign in** navigates through Access again. Failed discovery does not trigger an automatic retry loop.
+fails closed without exposing local credentials. Initial discovery and unknown-provenance errors
+use neutral availability wording. For a known Access session, use **Refresh session** after login;
+**Reload page** navigates through Access again. Failed discovery does not trigger an automatic retry
+loop.
+
+## Temporary public development demo
+
+The isolated development deployment may return `authentication: "development-bypass"` in its
+cloud session. An absent marker retains Access behavior; any other marker is malformed and fails
+closed. The demo stays in cloud mode with the same read-only controller guards, cookie-only
+requests, identity-header verification, review generations and expiry checks. The editor never
+supplies a bypass token or falls back to local credentials on a public host.
+
+A prominent notice identifies the public demo as synthetic-only, read-only and **not
+Access-authenticated**, with its full expiry date, time and timezone. A memory-only expiry value
+is retained solely for presentation through refreshing, unavailable and expired states. It grants
+no authority: review still requires a current valid cloud session. Those states never claim Access
+verification or ask demo viewers to log in. A valid Access discovery clears the demo presentation.
+Expiry removes the review and discards late responses. The server owns the fixed, at-most-seven-day
+demo lifetime and deployment isolation; editor rendering does not verify either deployment.
 
 ## Local owner workflow
 

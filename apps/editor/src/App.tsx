@@ -10,6 +10,8 @@ export function App() {
   const state = useSyncExternalStore(session.subscribe, session.getSnapshot);
   const { inputs, review, acceptance } = state;
   const unresolved = session.unresolved();
+  const developmentDemo = state.developmentDemoExpiresAt !== undefined;
+  const accessSession = !developmentDemo && state.cloudSession !== undefined;
   useEffect(() => {
     void session.refreshSession();
     const refresh = () => {
@@ -46,7 +48,12 @@ export function App() {
       <header className="page-header">
         <div>
           <p className="eyebrow">
-            or1 / {state.mode === "local" ? "local owner review" : "read-only cloud pilot"}
+            or1 /{" "}
+            {state.mode === "local"
+              ? "local owner review"
+              : developmentDemo
+                ? "public development demo"
+                : "read-only cloud pilot"}
           </p>
           <h1>Compare an option</h1>
         </div>
@@ -56,6 +63,22 @@ export function App() {
             : "Review the current heads. Acceptance and agent runs are disabled in this pilot."}
         </p>
       </header>
+      {state.developmentDemoExpiresAt !== undefined && (
+        <aside className="notice" aria-label="Public development demo">
+          <strong>
+            Public development demo · synthetic data only · read-only · not Access-authenticated
+          </strong>
+          Demo expiry:{" "}
+          <time dateTime={new Date(state.developmentDemoExpiresAt).toISOString()}>
+            {new Date(state.developmentDemoExpiresAt).toLocaleString(undefined, {
+              dateStyle: "full",
+              timeStyle: "long",
+            })}{" "}
+            ({Intl.DateTimeFormat().resolvedOptions().timeZone})
+          </time>
+          .
+        </aside>
+      )}
       <aside className="notice">
         <strong>Concept design only — not code certification.</strong> Gates check the brief and
         geometric consistency; heuristics do not establish regulatory compliance. Owner approval is
@@ -119,25 +142,40 @@ export function App() {
             disabled={state.refreshing}
             onClick={() => void session.refreshSession()}
           >
-            {state.refreshing ? "Checking Access session…" : "Refresh session"}
+            {state.refreshing
+              ? developmentDemo
+                ? "Checking demo availability…"
+                : accessSession
+                  ? "Checking Access session…"
+                  : "Checking session…"
+              : "Refresh session"}
           </button>
           {state.mode === "blocked" && (
             <button type="button" className="secondary" onClick={() => window.location.reload()}>
-              Reload to sign in
+              Reload page
             </button>
           )}
           <p className="setup cloud-status">
-            <strong>Read-only pilot.</strong> Use Cloudflare Access login, not a shared owner token.
-            {state.mode === "cloud" && state.cloudSession && (
+            <strong>{developmentDemo ? "Read-only demo." : "Read-only pilot."}</strong>{" "}
+            {developmentDemo
+              ? state.mode === "cloud"
+                ? "Public synthetic review only. Acceptance and agent runs are disabled."
+                : "Demo review is disabled until availability is confirmed."
+              : accessSession
+                ? "Use Cloudflare Access login, not a shared owner token."
+                : "Session discovery must succeed before review is available."}
+            {state.mode === "cloud" && state.cloudSession && !developmentDemo && (
               <>
                 {" "}
                 Session verified · expires{" "}
                 {new Date(state.cloudSession.expiresAt).toLocaleTimeString()}.
               </>
             )}
-            {state.mode === "cloud" && !state.cloudSession?.projects.length && (
-              <> Ask the pilot operator to assign a project to your Access identity.</>
-            )}
+            {state.mode === "cloud" &&
+              !state.cloudSession?.projects.length &&
+              (developmentDemo
+                ? " No synthetic projects are available."
+                : " Ask the pilot operator to assign a project to your Access identity.")}
           </p>
         </form>
       )}
@@ -352,7 +390,7 @@ export function App() {
           ) : (
             <section className="decision">
               <div>
-                <h2>Read-only pilot</h2>
+                <h2>{developmentDemo ? "Read-only demo" : "Read-only pilot"}</h2>
                 <p>
                   Comparison and server scorecards only. Acceptance and agent runs are disabled for
                   all pilot members, including owners.
@@ -371,7 +409,9 @@ export function App() {
                 ? "Enter a project ID, candidate ref, and local owner token above."
                 : state.mode === "cloud"
                   ? "Choose an assigned project and candidate ref above. Ref suggestions are navigation aids, not access restrictions."
-                  : "Sign in through Cloudflare Access to load your assigned projects."}{" "}
+                  : developmentDemo
+                    ? "Refresh the session to check whether public demo review is available."
+                    : "Refresh the session to discover available projects."}{" "}
               Main and the candidate will be compared at the same scale, with their actual server
               scorecards.
             </p>

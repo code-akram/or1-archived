@@ -33,42 +33,46 @@ const response = (body: unknown, principalId?: string, status = 200) =>
 afterEach(() => vi.useRealTimers());
 
 describe("cloud session", () => {
-  it("discovers assigned projects and uses cookies without any bearer or role", async () => {
-    const fetcher = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(response(cloudFixture()))
-      .mockResolvedValueOnce(response(reviewFixture(), "access-owner"));
-    const session = new ReviewSession(fetcher, "pilot.example.com");
-    session.setInputs({ projectId: "unassigned", ref: "option-a", token: "never-send" });
-    await session.review();
-    await session.accept();
-    await session.retry();
-    expect(fetcher).not.toHaveBeenCalled();
-    await session.refreshSession();
-    expect(session.getSnapshot().inputs).toEqual({
-      projectId: "synthetic-project",
-      ref: "option-a",
-      token: "",
-    });
-    await session.review();
-    expect(session.getSnapshot().review?.option.revisionId).toBe("option-head-29");
-    expect(fetcher.mock.calls[0]).toEqual([
-      "/api/session",
-      expect.objectContaining({ credentials: "same-origin", redirect: "error" }),
-    ]);
-    expect(fetcher.mock.calls[1]).toEqual([
-      "/api/tools/review_option",
-      expect.objectContaining({
-        credentials: "same-origin",
-        redirect: "error",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId: "synthetic-project", ref: "option-a" }),
-      }),
-    ]);
-    await session.accept();
-    await session.retry();
-    expect(fetcher).toHaveBeenCalledTimes(2);
-  });
+  it.each([undefined, "development-bypass"] as const)(
+    "discovers assigned projects and uses cookies without any bearer or role: %s",
+    async (authentication) => {
+      const fetcher = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(response({ ...cloudFixture(), authentication }))
+        .mockResolvedValueOnce(response(reviewFixture(), "access-owner"));
+      const session = new ReviewSession(fetcher, "pilot.example.com");
+      session.setInputs({ projectId: "unassigned", ref: "option-a", token: "never-send" });
+      await session.review();
+      await session.accept();
+      await session.retry();
+      expect(fetcher).not.toHaveBeenCalled();
+      await session.refreshSession();
+      expect(session.getSnapshot().cloudSession?.authentication).toBe(authentication);
+      expect(session.getSnapshot().inputs).toEqual({
+        projectId: "synthetic-project",
+        ref: "option-a",
+        token: "",
+      });
+      await session.review();
+      expect(session.getSnapshot().review?.option.revisionId).toBe("option-head-29");
+      expect(fetcher.mock.calls[0]).toEqual([
+        "/api/session",
+        expect.objectContaining({ credentials: "same-origin", redirect: "error" }),
+      ]);
+      expect(fetcher.mock.calls[1]).toEqual([
+        "/api/tools/review_option",
+        expect.objectContaining({
+          credentials: "same-origin",
+          redirect: "error",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ projectId: "synthetic-project", ref: "option-a" }),
+        }),
+      ]);
+      await session.accept();
+      await session.retry();
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it("restricts project navigation but permits unlisted refs for whole-project membership", async () => {
     const fetcher = vi
@@ -95,9 +99,13 @@ describe("cloud session", () => {
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
-  it.each(["owner", "viewer"] as const)(
-    "guards accept and retry independently of UI eligibility, tokens or a stale intent: %s",
-    async (membership) => {
+  it.each([
+    { membership: "owner" },
+    { membership: "viewer" },
+    { membership: "viewer", authentication: "development-bypass" },
+  ] as const)(
+    "guards accept and retry independently of UI eligibility, tokens or a stale intent: %j",
+    async ({ membership, ...authentication }) => {
       const localFetcher = vi
         .fn<typeof fetch>()
         .mockResolvedValueOnce(response({}, undefined, 404))
@@ -113,7 +121,11 @@ describe("cloud session", () => {
       const fetcher = vi
         .fn<typeof fetch>()
         .mockResolvedValueOnce(
-          response({ ...fixture, projects: [{ ...fixture.projects[0], membership }] }),
+          response({
+            ...fixture,
+            ...authentication,
+            projects: [{ ...fixture.projects[0], membership }],
+          }),
         )
         .mockResolvedValueOnce(response(reviewFixture(), "access-owner"));
       const cloud = new ReviewSession(fetcher, "pilot.example.com");
@@ -149,6 +161,14 @@ describe("cloud session", () => {
         }),
     ],
     ["expired", () => response({ ...cloudFixture(), expiresAt: Date.now() })],
+    ["unrenderable expiry", () => response({ ...cloudFixture(), expiresAt: 1e100 })],
+    ...["access", "other-bypass", null, false].map(
+      (authentication) =>
+        [
+          `malformed authentication ${authentication}`,
+          () => response({ ...cloudFixture(), authentication }),
+        ] as const,
+    ),
   ] as const)(
     "fails closed for %s and allows explicit recovery without a fetch loop",
     async (_name, makeResponse) => {
@@ -160,7 +180,9 @@ describe("cloud session", () => {
       await session.refreshSession();
       expect(session.getSnapshot().mode).toBe("blocked");
       expect(session.getSnapshot().cloudSession).toBeUndefined();
-      expect(session.getSnapshot().message).toContain("Cloudflare Access login");
+      expect(session.getSnapshot().developmentDemoExpiresAt).toBeUndefined();
+      expect(session.getSnapshot().message).toContain("Session unavailable");
+      expect(session.getSnapshot().message).not.toMatch(/Access|sign in|token/);
       session.setInputs({ projectId: "synthetic-project", ref: "option-a", token: "forbidden" });
       await session.review();
       await session.accept();
@@ -303,5 +325,117 @@ describe("cloud session", () => {
     expect(session.getSnapshot().message).toContain("login required");
     await session.refreshSession();
     expect(session.getSnapshot().message).toBe("");
+  });
+
+  it("retains only demo presentation through refresh/failure and clears it for Access", async () => {
+    const refreshing = Promise.withResolvers<Response>();
+    const expiresAt = Date.now() + 60_000;
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        response({ ...cloudFixture(), authentication: "development-bypass", expiresAt }),
+      )
+      .mockResolvedValueOnce(response(reviewFixture(), "access-owner"))
+      .mockReturnValueOnce(refreshing.promise)
+      .mockResolvedValueOnce(response(cloudFixture()));
+    const session = new ReviewSession(fetcher, "localhost");
+    await session.refreshSession();
+    await session.review();
+    expect(session.getSnapshot().mode).toBe("cloud");
+    expect(session.getSnapshot().developmentDemoExpiresAt).toBe(expiresAt);
+    const refresh = session.refreshSession();
+    expect(session.getSnapshot().mode).toBe("loading");
+    expect(session.getSnapshot().review).toBeUndefined();
+    expect(session.getSnapshot().developmentDemoExpiresAt).toBe(expiresAt);
+    refreshing.resolve(response({}, undefined, 404));
+    await refresh;
+    expect(session.getSnapshot().mode).toBe("blocked");
+    expect(session.getSnapshot().cloudSession).toBeUndefined();
+    expect(session.getSnapshot().developmentDemoExpiresAt).toBe(expiresAt);
+    expect(session.getSnapshot().message).toContain("Public development demo unavailable");
+    expect(session.getSnapshot().message).not.toMatch(/Use Cloudflare|sign in|login required/);
+    await session.review();
+    await session.accept();
+    await session.retry();
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    await session.refreshSession();
+    expect(session.getSnapshot().mode).toBe("cloud");
+    expect(session.getSnapshot().cloudSession?.authentication).toBeUndefined();
+    expect(session.getSnapshot().developmentDemoExpiresAt).toBeUndefined();
+  });
+
+  it.each(["success", "unauthorized"])(
+    "clears demo reviews at exact expiry and discards late %s without login instructions",
+    async (outcome) => {
+      vi.useFakeTimers();
+      const late = Promise.withResolvers<Response>();
+      const expiresAt = Date.now() + 500;
+      const fetcher = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          response({ ...cloudFixture(), authentication: "development-bypass", expiresAt }),
+        )
+        .mockResolvedValueOnce(response(reviewFixture(), "access-owner"))
+        .mockReturnValueOnce(late.promise);
+      const session = new ReviewSession(fetcher, "demo.example.com");
+      await session.refreshSession();
+      await session.review();
+      expect(session.getSnapshot().review).toBeDefined();
+      await vi.advanceTimersByTimeAsync(499);
+      session.expireSession();
+      expect(session.getSnapshot().review).toBeDefined();
+      const reviewing = session.review();
+      await vi.advanceTimersByTimeAsync(1);
+      session.expireSession();
+      expect(session.getSnapshot().mode).toBe("blocked");
+      expect(session.getSnapshot().review).toBeUndefined();
+      const message = session.getSnapshot().message;
+      expect(message).toContain("Public development demo expired");
+      expect(message).not.toMatch(/Access|login|sign in/);
+      late.resolve(
+        outcome === "success"
+          ? response(reviewFixture(), "access-owner")
+          : response({}, undefined, 401),
+      );
+      await reviewing;
+      expect(session.getSnapshot().review).toBeUndefined();
+      expect(session.getSnapshot().message).toBe(message);
+      expect(session.getSnapshot().developmentDemoExpiresAt).toBe(expiresAt);
+    },
+  );
+
+  it.each([
+    ["unauthorized", () => response({}, undefined, 401), "demo unavailable", "blocked"],
+    ["identity mismatch", () => response(reviewFixture(), "other"), "Demo identity", "cloud"],
+  ] as const)("uses demo wording for %s review failures", async (_name, reply, message, mode) => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(response({ ...cloudFixture(), authentication: "development-bypass" }))
+      .mockResolvedValueOnce(reply());
+    const session = new ReviewSession(fetcher, "demo.example.com");
+    await session.refreshSession();
+    await session.review();
+    expect(session.getSnapshot().review).toBeUndefined();
+    expect(session.getSnapshot().mode).toBe(mode);
+    expect(session.getSnapshot().message).toContain(message);
+    expect(session.getSnapshot().message).not.toMatch(/Access|login|sign in|token/);
+  });
+
+  it("recognizes an already expired demo for presentation but never grants review", async () => {
+    const expiresAt = Date.now();
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        response({ ...cloudFixture(), authentication: "development-bypass", expiresAt }),
+      );
+    const session = new ReviewSession(fetcher, "demo.example.com");
+    await session.refreshSession();
+    expect(session.getSnapshot().mode).toBe("blocked");
+    expect(session.getSnapshot().cloudSession).toBeUndefined();
+    expect(session.getSnapshot().developmentDemoExpiresAt).toBe(expiresAt);
+    await session.review();
+    await session.accept();
+    await session.retry();
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 });

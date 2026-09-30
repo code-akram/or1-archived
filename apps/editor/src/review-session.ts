@@ -16,6 +16,8 @@ type Acceptance =
 export type ReviewState = {
   mode: "loading" | "local" | "cloud" | "blocked";
   cloudSession: CloudSession | undefined;
+  /** Presentation only: retained after demo expiry/failure, never used for authorization. */
+  developmentDemoExpiresAt: number | undefined;
   refreshing: boolean;
   inputs: Inputs;
   reviewing: boolean;
@@ -30,6 +32,7 @@ export class ReviewSession {
   private state: ReviewState = {
     mode: "loading",
     cloudSession: undefined,
+    developmentDemoExpiresAt: undefined,
     refreshing: false,
     inputs: { projectId: "", ref: "", token: "" },
     reviewing: false,
@@ -91,11 +94,15 @@ export class ReviewSession {
         this.update({ mode: "local", cloudSession: undefined });
         return;
       }
-      if (!response.ok || response.redirected) throw new Error("Access session unavailable.");
+      if (!response.ok || response.redirected) throw new Error("Session unavailable.");
       const session: unknown = await response.json();
-      if (!isCloudSession(session) || session.expiresAt <= Date.now())
-        throw new Error("Access session malformed or expired.");
+      if (!isCloudSession(session)) throw new Error("Session malformed.");
       this.cloudDetected = true;
+      this.update({
+        developmentDemoExpiresAt:
+          session.authentication === "development-bypass" ? session.expiresAt : undefined,
+      });
+      if (session.expiresAt <= Date.now()) throw new Error("Session expired.");
       const previous = this.state.cloudSession;
       const samePrincipal = previous?.principalId === session.principalId;
       const project =
@@ -120,7 +127,11 @@ export class ReviewSession {
         cloudSession: undefined,
         inputs: { projectId: "", ref: "", token: "" },
         message:
-          "Access session unavailable or expired. Use Cloudflare Access login, then refresh the session. If login has expired, reload this page to sign in.",
+          this.state.developmentDemoExpiresAt !== undefined
+            ? "Public development demo unavailable or expired. Refresh the session to check whether the demo is enabled. No Access login is used for this demo."
+            : this.state.cloudSession
+              ? "Access session unavailable or expired. Use Cloudflare Access login, then refresh the session. If login has expired, reload this page to sign in."
+              : "Session unavailable, malformed or expired. Refresh the session or reload this page to check availability.",
       });
     } finally {
       clearTimeout(timeout);
@@ -137,7 +148,10 @@ export class ReviewSession {
       cloudSession: undefined,
       review: undefined,
       reviewing: false,
-      message: "Access session expired. Refresh the session or reload this page to sign in.",
+      message:
+        this.state.cloudSession.authentication === "development-bypass"
+          ? "Public development demo expired. Review is disabled. Refresh the session to check whether the demo is enabled."
+          : "Access session expired. Refresh the session or reload this page to sign in.",
     });
   }
 
@@ -177,7 +191,7 @@ export class ReviewSession {
         "review_option",
         input,
         token,
-        cloudSession?.principalId,
+        cloudSession,
       );
       this.expireSession();
       if (generation !== this.generation) return;
@@ -197,10 +211,19 @@ export class ReviewSession {
           mode: "blocked",
           cloudSession: undefined,
           reviewing: false,
-          message: "Access login required. Reload this page to sign in, then refresh the session.",
+          message:
+            cloudSession?.authentication === "development-bypass"
+              ? "Public development demo unavailable. Refresh the session to check whether the demo is enabled."
+              : "Access login required. Reload this page to sign in, then refresh the session.",
         });
       } else {
-        this.update({ reviewing: false, message: errorMessage(error) });
+        this.update({
+          reviewing: false,
+          message:
+            mode === "cloud" && !(error instanceof Error)
+              ? "Review request failed. Refresh the session and try again."
+              : errorMessage(error),
+        });
       }
     }
   }
@@ -305,8 +328,9 @@ export class ReviewSession {
     name: string,
     input: unknown,
     token: string,
-    principalId?: string,
+    session?: CloudSession,
   ): Promise<T> {
+    const principalId = session?.principalId;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 20_000);
     try {
@@ -323,7 +347,11 @@ export class ReviewSession {
       if (principalId && (response.status === 401 || response.redirected))
         throw new Error("Access login required.");
       if (principalId && response.headers.get("X-Or1-Principal-Id") !== principalId)
-        throw new Error("Access identity changed or was not verified. Refresh the session.");
+        throw new Error(
+          session?.authentication === "development-bypass"
+            ? "Demo identity changed or did not match the session. Refresh the session."
+            : "Access identity changed or was not verified. Refresh the session.",
+        );
       if (response.status >= 500) throw new Error(`Server unavailable (${response.status}).`);
       const result = (await response.json()) as T;
       if (!result || typeof result.ok !== "boolean" || (!response.ok && result.ok))
@@ -340,10 +368,12 @@ function isCloudSession(value: unknown): value is CloudSession {
   const session = value as CloudSession;
   return (
     session.mode === "cloud" &&
+    (session.authentication === undefined || session.authentication === "development-bypass") &&
     typeof session.principalId === "string" &&
     session.principalId.length > 0 &&
     typeof session.expiresAt === "number" &&
     Number.isFinite(session.expiresAt) &&
+    Number.isFinite(new Date(session.expiresAt).getTime()) &&
     Array.isArray(session.projects) &&
     session.projects.every(
       (project) =>
