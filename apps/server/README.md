@@ -165,6 +165,56 @@ login interaction is trusted and must not log credentials or redirect input.
 apply, but this is not a provider-side hard output/quota cap. Login and inference must remain explicit
 human/host actions; adapter tests mock provider network boundaries and spend no model quota.
 
+## Private evaluation command
+
+From the repository root:
+
+```sh
+pnpm eval --help
+pnpm eval --fixture synthetic-hall-living-study --mode replay
+pnpm eval --fixture synthetic-asymmetric-bedrooms --mode replay
+pnpm eval --fixture synthetic-hall-living-study --mode subscription
+# Alternatively select explicitly, or log in only to print the local catalog:
+pnpm eval --fixture synthetic-hall-living-study --mode subscription --model <model-id>
+pnpm eval --mode subscription --list-models
+```
+
+Mode is mandatory. Replay injects the fixture's construction operations through the real pi runner
+and registry; it is labelled `witness-replay`, with synthetic zero-token accounting. It proves
+feasibility and workflow integration, not independent model quality. Subscription mode reads only
+`shell.json` and `brief.json`, asks the model to inspect/build/score its own option, and is labelled
+`chatgpt-subscription`. It uses the existing runner defaults (60 seconds, 16,384 reported tokens,
+32 tool calls, four rejections); these are admission/accounting limits, not a provider-side quota cap.
+There is no automatic acceptance, hosted mutation, retry/resume loop, or paid API-key fallback.
+
+Subscription mode requires an interactive terminal. The operator must explicitly authorize ChatGPT
+OAuth and select a model, unless `--model` was supplied. A new command requires another login;
+tokens are memory-only. Nonsecret stable installation metadata is generated once in
+`~/.config/or1/device-id` with mode 0600; it is not a token cache. Login times out after ten minutes,
+and Ctrl+C cancels login/run. Each prompt honors both the overall and per-prompt abort signals.
+The new OpenAI provider has no device-code login. If your browser is on a different machine from
+the runner, either forward port 1455 to that runner for the loopback callback, or paste the **full
+redirect URL** into the interactive terminal's manual prompt. Do not paste it into chat or record
+it in logs. `--list-models` authenticates and prints pi's local catalog, not verified entitlements;
+the provider may still refuse an inference request.
+
+Every evaluation uses a new mode-0700 directory under `OR1_DATA_DIR/eval-runs/test-fit-*`, containing
+mode-0600 `or1.sqlite`, `summary.json`, `review.json` and `turns.json`. Outputs must stay outside the
+checkout, including through symlink aliases. The summary records the source mode, model, persisted
+run, terminal spend/settlement, untouched-main status and whether a witness was available. The review
+contains coherent models/plans, assignments, scores and acceptance pins. Successful command exit
+requires an `options` outcome, passing fresh core gates, and all candidate wall endpoints inside the
+original rectangular shell bounds. This last benchmark check is reported separately: core scorecard
+validity alone does not prohibit a stray wall outside the shell. It is not general polygon containment
+or building-code certification. A failed attempt remains inspectable and is not proof of infeasibility.
+
+To review an output in the local editor, use the printed `directory` as `OR1_DATA_DIR` when starting
+the owner-enabled loopback server (see above), then enter the printed `projectId` and ref `option`.
+Acceptance remains an explicit owner's action with fresh pins. Evaluation does not promote main.
+Opening the database and reloading the run/turns is supported; constructing another live runner or
+automatically resuming the prior run is not. Neither this command nor local review changes the
+public read-only Cloudflare pilot.
+
 ## Execution and outcome contract
 
 - One pi `Agent` on one scoped option ref. Only `inspect_project`, `apply_changes`, and `scorecard`

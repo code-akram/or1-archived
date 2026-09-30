@@ -8,7 +8,8 @@ Status: the v2 core, transactional SQLite mutation path, shared tool registry, a
 persisted single-option pi workflow are implemented, with a minimal authenticated SVG option-review
 UI and owner-only transactional acceptance into main. Requirements use explicit space assignments;
 scorecards pass configured concept-design checks, **not building-code certification**. Default
-HTTP/MCP exposes no unauthenticated project access or mutation. Run generation remains programmatic;
+HTTP/MCP exposes no unauthenticated project access or mutation. Run generation is private and local
+(programmatic or the explicit evaluation command below);
 geometry editing UI, automatic recovery/resume, and the full agent/diversity evaluation suite remain
 future work. Deterministic injected pi streams verify the workflow without spending on external
 model APIs; they do not establish model design quality.
@@ -54,6 +55,34 @@ pnpm or1 tools    # CLI
 ```
 
 Project data lives in `~/.local/share/or1` (`OR1_DATA_DIR` overrides it), never in this repo.
+
+## Private test-fit evaluations
+
+Two feasible synthetic multi-room benchmarks now exercise partitions, connecting doors, explicit
+room assignments, asymmetric requirements and pinned scorecards. Run the disclosed witness replay
+without a login or model call:
+
+```sh
+pnpm eval --fixture synthetic-hall-living-study --mode replay
+pnpm eval --fixture synthetic-asymmetric-bedrooms --mode replay
+```
+
+Each invocation creates a fresh private database, review and run ledger under
+`OR1_DATA_DIR/eval-runs/`. It never overwrites an earlier evaluation or automatically accepts main.
+Replay proves workflow/fixture feasibility, **not agent design quality**.
+
+For a real attempt, run this in an interactive terminal and explicitly authorize your own ChatGPT
+subscription through the browser prompt, then select a model:
+
+```sh
+pnpm eval --fixture synthetic-hall-living-study --mode subscription
+```
+
+Live mode loads only the shell and brief, not witness solutions. OAuth tokens stay in process memory;
+there is no paid API-key fallback or public agent endpoint. The authenticated model list is a local
+catalog, not verified entitlement. Runner accounting/cancellation is **not a hard provider quota
+cap**. See the [evaluation and local review instructions](apps/server/README.md#private-evaluation-command)
+for remote-browser login, output interpretation and explicit owner review.
 
 ## Review and acceptance
 
